@@ -8,7 +8,7 @@ from fastapi.testclient import TestClient
 from dartrag.answer import Answer, LLMError
 from dartrag.answer.service import check_citations
 from dartrag.search import SearchHit
-from dartrag.web import Services, create_app
+from dartrag.web import Services, chat, create_app
 
 HIT = SearchHit(
     "c1",
@@ -880,6 +880,8 @@ def test_password_hashing():
 def sse_events(text):
     out = []
     for block in text.strip().split("\n\n"):
+        if block.startswith(":"):  # 연결 유지용 주석 줄
+            continue
         lines = dict(line.split(": ", 1) for line in block.splitlines())
         out.append((lines["event"], json.loads(lines["data"])))
     return out
@@ -979,6 +981,44 @@ def test_ask_stream_llm_error():
     client = TestClient(create_app(Services(repo_cm, lambda r: FakeAnswerer(fail=True), None)))
     events = sse_events(client.post("/api/ask/stream", json={"question": "매출은?"}).text)
     assert events[-1][0] == "error" and "Ollama" in events[-1][1]["detail"]
+
+
+def test_ask_stream_unexpected_error_becomes_error_event(caplog):
+    """검색 저장소 오류처럼 LLM 밖에서 난 오류도 연결을 끊지 않고 화면에 알린다."""
+    repo = FakeRepo()
+
+    @contextmanager
+    def repo_cm():
+        yield repo
+
+    class Broken(FakeAnswerer):
+        def stream(self, question, flt, **kw):
+            raise RuntimeError("Collection dart_chunks not found")
+            yield
+
+    client = TestClient(create_app(Services(repo_cm, lambda r: Broken(), None)))
+    events = sse_events(client.post("/api/ask/stream", json={"question": "매출은?"}).text)
+    assert [e for e, _ in events] == ["meta", "error"]
+    assert events[-1][1]["detail"] == chat.STREAM_FAILED  # 내부 오류 내용은 화면에 내보내지 않는다
+    assert "dart_chunks" in caplog.text  # 서버 기록에는 남긴다
+
+
+def test_keepalive_fills_long_gaps():
+    import asyncio
+    import time
+
+    def slow():
+        yield "event: meta\ndata: {}\n\n"
+        time.sleep(0.2)  # 임베딩 모델을 불러오는 동안처럼 한참 보낼 것이 없다
+        yield "event: done\ndata: {}\n\n"
+
+    async def collect():
+        return [x async for x in chat.keepalive(slow(), every=0.05)]
+
+    out = asyncio.run(collect())
+    assert out[0].startswith("event: meta") and out[-1].startswith("event: done")
+    assert ": keep-alive\n\n" in out[1:-1]
+    assert [e for e, _ in sse_events("".join(out))] == ["meta", "done"]
 
 
 def test_feedback(ctx):

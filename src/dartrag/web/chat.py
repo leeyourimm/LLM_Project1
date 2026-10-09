@@ -1,8 +1,10 @@
 """질문·답변 API: 이어지는 질문, 대화 기록, 스트리밍, 답변 평가."""
 
+import asyncio
 import json
+import logging
 import time
-from collections.abc import Callable, Iterator
+from collections.abc import AsyncIterator, Callable, Iterator
 from datetime import date
 from typing import Annotated, Literal
 
@@ -16,7 +18,12 @@ from dartrag.answer.trust import assess
 from dartrag.obs import metrics
 from dartrag.search import SearchFilter
 
+log = logging.getLogger(__name__)
+
 DISCLAIMER = "공시 정보 요약이며 투자 권유가 아닙니다. 중요한 판단은 원문을 확인하세요."
+STREAM_FAILED = "답변을 만들다 서버에서 오류가 났습니다. 잠시 뒤 다시 물어봐 주세요."
+# 이 시간 동안 보낼 이벤트가 없으면 연결 유지용 주석 줄을 보낸다
+KEEPALIVE_SECONDS = 10.0
 FEEDBACK_REASONS = ("wrong_number", "wrong_source", "not_found", "unhelpful", "other")
 
 
@@ -69,6 +76,31 @@ def _sources(hits, cited: set[int] | None = None, quotes: dict | None = None) ->
 
 def _sse(event: str, data: dict) -> str:
     return f"event: {event}\ndata: {json.dumps(data, ensure_ascii=False, default=str)}\n\n"
+
+
+async def keepalive(events: Iterator[str], every: float = KEEPALIVE_SECONDS) -> AsyncIterator[str]:
+    """이벤트 사이가 every 초보다 길어지면 SSE 주석 줄(": keep-alive")을 보낸다.
+
+    첫 질문에 임베딩 모델을 불러오거나 LLM 이 첫 글자를 내기까지 수십 초가 걸릴 수 있다.
+    그동안 아무것도 보내지 않으면 중간 프록시(Next 개발 서버는 30초, Cloudflare 는 100초)가
+    연결을 끊는다. 브라우저의 SSE 읽기는 주석 줄을 무시한다.
+    """
+    from anyio import to_thread
+
+    end = object()
+    pending: asyncio.Task | None = None
+    while True:
+        if pending is None:
+            pending = asyncio.ensure_future(to_thread.run_sync(next, events, end))
+        done, _ = await asyncio.wait({pending}, timeout=every)
+        if not done:
+            yield ": keep-alive\n\n"
+            continue
+        item = pending.result()
+        pending = None
+        if item is end:
+            return
+        yield item
 
 
 def _no_limit(scope: str, when=None):
@@ -163,17 +195,19 @@ def build_router(  # noqa: N803
             conv_id, resolved, flt, _ = prepare(repo, req, user)
 
         def events() -> Iterator[str]:
-            with services.repo() as repo:
-                answerer = services.answerer(repo)
-                yield _sse(
-                    "meta",
-                    {
-                        "conversation_id": conv_id,
-                        "question": resolved.question,
-                        "inherited": resolved.inherited,
-                    },
-                )
-                try:
+            # 스트림을 연 뒤에 난 오류는 상태 코드로 알릴 수 없으므로 error 이벤트로 보낸다.
+            # 그냥 던지면 연결이 끊겨 화면에는 "연결이 끊겼습니다"만 보인다
+            try:
+                with services.repo() as repo:
+                    answerer = services.answerer(repo)
+                    yield _sse(
+                        "meta",
+                        {
+                            "conversation_id": conv_id,
+                            "question": resolved.question,
+                            "inherited": resolved.inherited,
+                        },
+                    )
                     stream = answerer.stream(
                         resolved.question, flt, user_id=uid(user), session_id=conv_id
                     )
@@ -186,11 +220,14 @@ def build_router(  # noqa: N803
                             model = value.model or answerer.llm.name
                             done = finish(repo, conv_id, resolved, value, model, started)
                             yield _sse("done", done)
-                except LLMError as e:
-                    yield _sse("error", {"detail": str(e)})
+            except LLMError as e:
+                yield _sse("error", {"detail": str(e)})
+            except Exception:
+                log.exception("스트리밍 답변 실패 (대화 %s)", conv_id)
+                yield _sse("error", {"detail": STREAM_FAILED})
 
         return StreamingResponse(
-            events(),
+            keepalive(events()),
             media_type="text/event-stream",
             headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
         )

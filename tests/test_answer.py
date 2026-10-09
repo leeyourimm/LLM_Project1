@@ -6,6 +6,7 @@ import respx
 
 from dartrag.answer import NOT_FOUND, Answerer, LLMError, Message, OllamaLLM
 from dartrag.answer.prompt import build_messages
+from dartrag.answer.service import NO_DATA
 from dartrag.search import SearchFilter, SearchHit
 
 
@@ -85,6 +86,22 @@ def test_answer_not_found_paths():
 
     result = Answerer(FakeRetriever(HITS), FakeLLM(NOT_FOUND)).answer("q")
     assert not result.found and result.warnings == []
+
+
+def test_no_indexed_filings_answers_right_away():
+    retriever, llm = FakeRetriever(HITS), FakeLLM("unused")
+    empty = Answerer(retriever, llm, has_data=lambda: False)
+    result = empty.answer("삼성전자 2024년 영업이익률은?")
+    # 검색 모델을 불러오거나 LLM 을 부르지 않고 바로 안내한다
+    assert result.text == NO_DATA and not result.found and not result.refused
+    assert retriever.calls == [] and llm.messages is None
+    events = list(empty.stream("삼성전자 2024년 영업이익률은?"))
+    assert [k for k, _ in events] == ["token", "done"] and events[0][1] == NO_DATA
+    # 투자 권유처럼 정책상 거절하는 질문은 데이터가 없어도 거절 문구로 답한다
+    assert empty.answer("삼성전자 지금 사도 돼?").refused
+
+    ready = Answerer(retriever, FakeLLM("매출은 300조원입니다 [1]."), has_data=lambda: True)
+    assert ready.answer("매출은?").found and retriever.calls
 
 
 URL = "http://ollama:11434"

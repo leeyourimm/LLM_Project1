@@ -219,6 +219,13 @@ class Repository:
             for r in rows
         ]
 
+    def has_indexed_filings(self) -> bool:
+        """검색할 공시가 하나라도 색인돼 있는지. 없으면 질문에 바로 안내한다."""
+        row = self.conn.execute(
+            "SELECT EXISTS (SELECT 1 FROM filings WHERE indexed_at IS NOT NULL)"
+        ).fetchone()
+        return bool(row[0])
+
     def mark_indexed(self, rcept_no: str, index_version: int, index_model: str) -> None:
         self.conn.execute(
             """UPDATE filings SET indexed_at = now(), index_version = %s, index_model = %s

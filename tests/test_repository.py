@@ -125,6 +125,7 @@ def test_index_state_and_pipeline(repo):
     chunks = [Chunk(f"c{i}", "text", ["II. 사업"], "삼성전자 2024", f"매출 {i}", i) for i in (1, 2)]
     repo.replace_chunks("20250311000001", "00126380", [("a.xml", chunks)], 1)
     assert repo.filings_to_index(INDEX_VERSION, "fake") == ["20250311000001"]
+    assert not repo.has_indexed_filings()  # 파싱만 하고 색인 전이면 답할 공시가 없다
     indexed = repo.indexed_chunks("20250311000001")
     assert [c.chunk_id for c in indexed] == ["c1", "c2"]
     assert indexed[0].text == "삼성전자 2024\n\n매출 1"
@@ -161,6 +162,7 @@ def test_index_state_and_pipeline(repo):
     assert keyword.docs == ["c1", "c2"] and keyword.refreshed
     assert sorted(vector.search([1.0, 0.0], SearchFilter(), 10)) == ["c1", "c2"]
     assert repo.filings_to_index(INDEX_VERSION, "fake") == []
+    assert repo.has_indexed_filings()
     # 임베딩 모델이 바뀌면 다시 색인 대상
     assert repo.filings_to_index(INDEX_VERSION, "other") == ["20250311000001"]
 
