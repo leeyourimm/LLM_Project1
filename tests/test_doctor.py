@@ -133,3 +133,33 @@ def test_check_alerts():
     assert not bad.ok
     assert "SMTP_HOST" in bad.detail and "SECRET_KEY" in bad.detail
     assert "TELEGRAM_BOT_USERNAME" in bad.detail
+
+
+def test_security_problems_only_for_public_servers():
+    assert doctor.security_problems(Settings(_env_file=None)) == []
+    problems = doctor.security_problems(
+        Settings(
+            _env_file=None,
+            auth_required=True,
+            public_url="https://dart.example",
+            cookie_secure=False,
+            secret_key="short",
+            telegram_webhook_secret="abc",
+        )
+    )
+    text = " ".join(problems)
+    assert "COOKIE_SECURE" in text and "SECRET_KEY" in text and "METRICS_TOKEN" in text
+    assert "TELEGRAM_WEBHOOK_SECRET" in text
+    good = Settings(
+        _env_file=None,
+        auth_required=True,
+        public_url="https://dart.example",
+        cookie_secure=True,
+        secret_key="x" * 40,
+        metrics_token="m" * 32,
+    )
+    assert doctor.security_problems(good) == [] and doctor.check_security(good).ok
+    open_prod = doctor.security_problems(
+        Settings(_env_file=None, environment="production", auth_required=False)
+    )
+    assert any("AUTH_REQUIRED" in p for p in open_prod)

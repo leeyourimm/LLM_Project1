@@ -11,6 +11,7 @@ from dataclasses import asdict, dataclass, field
 
 from dartrag.answer.llm import LLM, Message
 from dartrag.answer.numbers import unverified_numbers
+from dartrag.answer.prompt import neutralize_tags
 from dartrag.changes.compare import Comparison
 
 # 프롬프트나 항목 고르는 규칙을 바꾸면 올린다. 저장된 요약을 다시 만들게 된다
@@ -134,7 +135,7 @@ def select_evidence(comparison: Comparison) -> list[EvidenceItem]:
 def build_messages(corp_name: str, comparison: Comparison, items: list[EvidenceItem]):
     body = "\n".join(
         f'<item id="{i.number}">[{i.number}] {i.section} | {i.kind}\n'
-        f"{i.text.replace('</item>', '</ item>')}\n</item>"
+        f"{neutralize_tags(i.text, 'item')}\n</item>"
         for i in items
     )
     user = (

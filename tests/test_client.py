@@ -4,7 +4,7 @@ import httpx
 import pytest
 import respx
 
-from dartrag.dart import DartApiError, OpenDartClient
+from dartrag.dart import DartApiError, DartHttpError, OpenDartClient
 from dartrag.dart.client import BASE_URL
 
 
@@ -118,3 +118,18 @@ def test_iter_filings_all_companies(client):
     params = route.calls[0].request.url.params
     assert "corp_code" not in params
     assert params["pblntf_ty"] == "B" and params["last_reprt_at"] == "N"
+
+
+@respx.mock
+def test_http_errors_do_not_leak_key(client):
+    respx.get(f"{BASE_URL}/list.json").respond(status_code=500)
+    with pytest.raises(DartHttpError) as e:
+        list(client.iter_filings("00126380", date(2023, 1, 1), date(2023, 2, 1)))
+    # httpx 의 오류 메시지에는 crtfc_key 가 든 주소가 들어 있다. 작업 기록·로그로 퍼지지 않게 뺀다
+    assert "test-key" not in str(e.value) and "HTTP 500" in str(e.value)
+    assert e.value.__cause__ is None and e.value.__suppress_context__
+
+    respx.get(f"{BASE_URL}/fnlttSinglAcntAll.json").mock(side_effect=httpx.ConnectError("x"))
+    with pytest.raises(DartHttpError) as e:
+        client.financial_statements("00126380", 2023, "11011")
+    assert "ConnectError" in str(e.value) and "test-key" not in str(e.value)

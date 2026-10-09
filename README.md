@@ -3,6 +3,7 @@
 상장사 공시를 수집해서 **근거를 대며 답하고, 수치를 정확히 보여주고, 변화가 생기면 알려주는** 서비스입니다.
 전체 설계는 [docs/design.md](docs/design.md)에 있습니다.
 AWS 서버 한 대에 배포하는 방법은 [docs/terraform.md](docs/terraform.md)에 있습니다.
+주요 기술 선택의 이유는 [의사결정 기록(ADR)](docs/adr/README.md)에, 보안 점검 결과는 [docs/security-review.md](docs/security-review.md)에 있습니다.
 
 > 이 서비스는 공시 정보의 검색·요약을 제공하며 투자 권유가 아닙니다.
 
@@ -42,6 +43,9 @@ dartrag user add me@example.com
 - 같은 계정이나 같은 IP에서 로그인을 여러 번 틀리면 15분 동안 막습니다.
 - 관심 종목은 사용자마다 따로 저장됩니다. 웹훅 알림은 운영자 목록(`dartrag watch`) 기준입니다.
 - `COOKIE_SECURE=true`는 https로 서비스할 때만 켜세요. http에서 켜면 로그인이 유지되지 않습니다. 리버스 프록시 뒤에서 쓸 때는 실제 접속 IP가 보이도록 `uvicorn`의 `--proxy-headers` 설정이 필요합니다.
+
+## 서버에 배포하기
+리눅스 서버 한 대에 Docker로 https 서비스를 띄우는 방법(처음 실행, 상태 확인, 로그, 업데이트, 백업·되돌리기, 모니터링)은 [docs/deploy.md](docs/deploy.md)에 있습니다. 설정 파일은 `infra/prod/`에 있습니다.
 
 ## 빠른 시작
 명령어는 한 줄씩 실행하세요. (macOS 기본 셸 zsh는 줄 끝 `#` 주석을 인식하지 않습니다.)

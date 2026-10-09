@@ -861,7 +861,7 @@ def user_list():
 
 @user_app.command("remove")
 def user_remove(email: str):
-    """계정 삭제 (관심 종목, 로그인 기록도 함께 삭제)."""
+    """계정 삭제 (화면의 탈퇴와 같은 경로: 관심 종목, 알림 설정, 대화 기록, 세션까지)."""
     removed = Repository.connect(get_settings().database_url).remove_user(email.strip().lower())
     typer.echo(f"{email} {'삭제' if removed else '없는 계정'}")
 

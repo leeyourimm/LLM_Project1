@@ -565,3 +565,100 @@ def test_ops_snapshot_and_eval_runs(repo):
     repo.save_eval_run({"llm": "b"}, {"overall": {"pass_rate": 0.9}}, True)
     latest = repo.ops_snapshot()["eval"]
     assert latest["meta"] == {"llm": "b"} and latest["passed"] is True
+
+
+def _user_references(repo) -> list[tuple[str, str]]:
+    """users(id) 를 가리키는 모든 (표, 열). 나중에 표가 늘어도 이 목록으로 검사한다."""
+    return repo.conn.execute(
+        """SELECT cl.relname, a.attname
+           FROM pg_constraint c
+           JOIN pg_class cl ON cl.oid = c.conrelid
+           JOIN pg_attribute a ON a.attrelid = c.conrelid AND a.attnum = ANY (c.conkey)
+           WHERE c.contype = 'f' AND c.confrelid = 'users'::regclass
+           ORDER BY 1"""
+    ).fetchall()
+
+
+def _seed_user(repo, email: str, rcept_no: str) -> dict:
+    from datetime import UTC, datetime, timedelta
+
+    uid = repo.create_user(email, "scrypt$secret-hash")
+    later = datetime.now(UTC) + timedelta(days=1)
+    repo.create_session(email[0] * 64, uid, later)
+    repo.set_watch("00126380", 2, uid)
+    repo.start_alert_channel(uid, "email", email, "p" * 63 + email[0], later)
+    repo.start_alert_channel(uid, "telegram", None, "q" * 63 + email[0], later)
+    repo.confirm_alert_channel("telegram", "q" * 63 + email[0], target="42")
+    repo.mark_user_notified(uid, [rcept_no], "email")
+    conv = repo.create_conversation(uid, f"{email} 질문")
+    repo.add_message(conv, "user", "삼성전자 매출은?", {"context": {}})
+    answer = repo.add_message(conv, "assistant", "답 [1]", {"sources": []})
+    assert repo.set_feedback(answer, uid, -1, "wrong_number", "숫자가 달라요")
+    return {"uid": uid, "conv": conv, "answer": answer}
+
+
+def _count(repo, table: str, column: str | None = None, value=None) -> int:
+    where = f" WHERE {column} = %s" if column else ""
+    params = (value,) if column else ()
+    return repo.conn.execute(f"SELECT count(*) FROM {table}{where}", params).fetchone()[0]
+
+
+def test_delete_user_leaves_no_rows(repo):
+    repo.upsert_companies([Corp(corp_code="00126380", corp_name="삼성전자", stock_code="005930")])
+    repo.conn.execute(
+        """INSERT INTO disclosures (rcept_no, corp_code, corp_name, report_nm, rcept_dt,
+               pblntf_ty, event_type, event_label, importance, correction)
+           VALUES ('20250311000001', '00126380', '삼성전자', 'x', '2025-03-11',
+                   'B', 'x', 'x', 3, false)"""
+    )
+    repo.conn.commit()
+    a = _seed_user(repo, "a@b.co", "20250311000001")
+    b = _seed_user(repo, "c@d.co", "20250311000001")
+
+    refs = _user_references(repo)
+    assert {t for t, _ in refs} >= {
+        "sessions",
+        "user_watchlist",
+        "user_alert_channels",
+        "user_notifications",
+        "conversations",
+    }
+    # 사용자를 가리키는 외래 키는 모두 ON DELETE CASCADE (직접 지우기를 빠뜨려도 남지 않게)
+    rules = repo.conn.execute(
+        "SELECT conrelid::regclass::text, confdeltype FROM pg_constraint "
+        "WHERE contype = 'f' AND confrelid = 'users'::regclass"
+    ).fetchall()
+    assert rules and all(rule == "c" for _, rule in rules), rules
+
+    exported = repo.export_user(a["uid"])
+    assert exported["account"]["email"] == "a@b.co"
+    assert [w["stock_code"] for w in exported["watchlist"]] == ["005930"]
+    assert {c["kind"]: c["target"] for c in exported["alert_channels"]} == {
+        "email": "a@b.co",
+        "telegram": "42",
+    }
+    assert exported["notifications"][0]["rcept_no"] == "20250311000001"
+    [conv] = exported["conversations"]
+    assert [m["role"] for m in conv["messages"]] == ["user", "assistant"]
+    assert conv["messages"][1]["feedback"]["comment"] == "숫자가 달라요"
+    assert conv["messages"][0]["feedback"] is None
+    flat = repr(exported)
+    assert "secret-hash" not in flat and "pppp" not in flat and "c@d.co" not in flat
+
+    assert repo.delete_user(a["uid"]) and not repo.delete_user(a["uid"])
+    assert repo.export_user(a["uid"]) is None
+    for table, column in refs:
+        assert _count(repo, table, column, a["uid"]) == 0, table
+    assert _count(repo, "messages", "conversation_id", a["conv"]) == 0
+    assert _count(repo, "feedback", "message_id", a["answer"]) == 0
+    assert _count(repo, "users", "id", a["uid"]) == 0
+    # 다른 사용자의 기록과 공시는 그대로
+    assert repo.export_user(b["uid"])["conversations"][0]["messages"][1]["feedback"]
+    assert repo.session_user("c" * 64) == (b["uid"], "c@d.co")
+    assert _count(repo, "disclosures") == 1
+
+    # CLI(dartrag user remove)도 같은 삭제 경로를 쓴다
+    assert repo.remove_user("c@d.co") and not repo.remove_user("c@d.co")
+    for table, _ in refs:
+        assert _count(repo, table) == 0, table
+    assert _count(repo, "messages") == 0 and _count(repo, "feedback") == 0

@@ -135,7 +135,7 @@ cat /srv/dartrag/NEXT_STEPS.txt
 cd /srv/dartrag/app
 ls infra/prod
 ```
-`infra/prod/.env.example`이 있으면 복사해서 시작합니다.
+`infra/prod/.env.example`을 복사해서 시작합니다. 항목별 설명은 [docs/deploy.md](deploy.md)에 있습니다.
 ```bash
 cp infra/prod/.env.example infra/prod/.env
 ```
@@ -170,6 +170,7 @@ docker compose -f infra/prod/docker-compose.yml up -d --build
 
 ## 9. 백업
 서버의 IAM 역할로 백업 버킷에 올릴 수 있습니다(키 입력 불필요). 버킷 이름은 `terraform output -raw backup_bucket_name` 또는 `/srv/dartrag/NEXT_STEPS.txt`에 있습니다.
+`infra/prod/.env`의 `BACKUP_S3_BUCKET`에 이 버킷 이름을 넣으면 `infra/prod/backup.sh`(매일 실행 방법은 [docs/deploy.md](deploy.md)의 "백업과 되돌리기")가 백업을 버킷에도 올립니다. 손으로 올릴 때는:
 ```bash
 aws s3 cp 백업파일.dump s3://버킷이름/postgres/백업파일.dump
 aws s3 ls s3://버킷이름/postgres/

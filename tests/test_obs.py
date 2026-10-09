@@ -226,6 +226,32 @@ def test_sentry_scrub_removes_private_data():
     assert crumb["message"] == "to [이메일]" and "data" not in crumb
 
 
+def test_sentry_scrub_removes_query_secrets():
+    url = "https://opendart.fss.or.kr/api/list.json?crtfc_key=abcdef0123456789&page_no=1"
+    event = {
+        "message": f"HTTP Request: GET {url}",
+        "breadcrumbs": {"values": [{"message": "GET /api/alerts/email/verify?token=xyz123"}]},
+        "exception": {"values": [{"value": f"Client error for url '{url}'"}]},
+    }
+    out = scrub_event(event)
+    assert "abcdef0123456789" not in out["message"] and "page_no=1" in out["message"]
+    assert "crtfc_key=[삭제]" in out["exception"]["values"][0]["value"]
+    assert "xyz123" not in out["breadcrumbs"]["values"][0]["message"]
+
+
+def test_worker_keeps_http_request_logs_quiet(monkeypatch):
+    import importlib
+    import logging
+    import sys
+
+    logging.getLogger("httpx").setLevel(logging.NOTSET)
+    monkeypatch.delitem(sys.modules, "dartrag.worker.celery_app", raising=False)
+    pytest.importorskip("celery")
+    importlib.import_module("dartrag.worker.celery_app")
+    # httpx 는 INFO 로 요청 주소(인증키·봇 토큰 포함)를 남긴다
+    assert logging.getLogger("httpx").getEffectiveLevel() >= logging.WARNING
+
+
 def test_init_sentry_off_without_dsn():
     from dartrag.config import Settings
     from dartrag.obs.errors import init_sentry

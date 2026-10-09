@@ -20,6 +20,10 @@ def build():
     )
     logging.getLogger("httpx").setLevel(logging.WARNING)
     init_sentry(settings, "api")
+    from dartrag.doctor import security_problems
+
+    for problem in security_problems(settings):
+        logging.getLogger("dartrag.security").warning("보안 설정 확인: %s", problem)
     repo = Repository.connect(settings.database_url)
     try:
         repo.migrate()
