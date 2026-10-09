@@ -16,21 +16,76 @@ def test_env_file(tmp_path):
     assert doctor.check_env_file(S, env).ok
 
 
+API = "https://opendart.fss.or.kr/api"
+LIST_OK = {"status": "000", "list": [{"rcept_no": "20260814000123", "report_nm": "반기보고서"}]}
+
+
+def _dart_routes(list_json=LIST_OK, corp=b"PK\x03\x04zip", fs=None, doc=b"PK\x03\x04zip"):
+    def route(path, **response):
+        return respx.get(f"{API}/{path}").mock(return_value=httpx.Response(200, **response))
+
+    return {
+        "list": route("list.json", json=list_json),
+        "corp": route("corpCode.xml", content=corp),
+        "fs": route("fnlttSinglAcntAll.json", json=fs or {"status": "000", "list": []}),
+        "doc": route("document.xml", content=doc),
+    }
+
+
 @respx.mock
 def test_opendart_statuses():
-    route = respx.get("https://opendart.fss.or.kr/api/list.json")
     with httpx.Client() as http:
-        route.mock(return_value=httpx.Response(200, json={"status": "013"}))
-        assert doctor.check_opendart(S, http).ok
-        route.mock(return_value=httpx.Response(200, json={"status": "800"}))
-        assert "점검" in doctor.check_opendart(S, http).detail
-        route.mock(return_value=httpx.Response(200, json={"status": "010"}))
+        routes = _dart_routes()
+        c = doctor.check_opendart(S, http)
+        assert c.ok
+        # 원문은 공시 검색에서 찾은 접수번호로 확인한다
+        assert routes["doc"].calls.last.request.url.params["rcept_no"] == "20260814000123"
+        assert routes["corp"].called and routes["fs"].called
+
+        _dart_routes(list_json={"status": "013"})
+        assert doctor.check_opendart(S, http).ok  # 데이터 없음도 정상 응답
+
+        _dart_routes(list_json={"status": "800", "message": "점검"})
+        c = doctor.check_opendart(S, http)
+        assert not c.ok and "공시 검색" in c.detail and "점검" in c.detail
+
+        _dart_routes(list_json={"status": "010"})
         c = doctor.check_opendart(S, http)
         assert not c.ok and "인증키" in c.detail
+
+        route = respx.get(f"{API}/list.json")
         route.mock(side_effect=httpx.ConnectError("boom secret-key-123"))
         c = doctor.check_opendart(S, http)
         assert not c.ok and "secret-key-123" not in format_checks([c])
     assert not doctor.check_opendart(Settings(_env_file=None), httpx.Client()).ok
+
+
+@respx.mock
+def test_opendart_maintenance_beyond_search():
+    """점검 중에 공시 검색만 열려 있어도 수집에 쓰는 다른 기능이 막히면 ❌ 로 알린다."""
+    xml_800 = "<result><status>800</status><message>시스템 점검</message></result>".encode()
+    with httpx.Client() as http:
+        _dart_routes(corp=xml_800)
+        c = doctor.check_opendart(S, http)
+        assert not c.ok and "회사 목록" in c.detail and "점검" in c.detail
+        assert "다시 실행" in c.fix
+
+        _dart_routes(fs={"status": "800", "message": "점검"})
+        c = doctor.check_opendart(S, http)
+        assert not c.ok and "재무제표" in c.detail
+
+        _dart_routes(doc=xml_800)
+        c = doctor.check_opendart(S, http)
+        assert not c.ok and "원문" in c.detail
+        assert "secret-key-123" not in format_checks([c])
+
+
+def test_dart_status_from_head():
+    assert doctor._dart_status(b"PK\x03\x04") is None
+    assert doctor._dart_status(b'{"status":"000","message":"ok"}') == "000"
+    assert doctor._dart_status(b'{"status" : "013"}') == "013"
+    assert doctor._dart_status(b"<result><status>800</status></result>") == "800"
+    assert doctor._dart_status(b"<html>maintenance</html>") == "900"
 
 
 @respx.mock
@@ -96,7 +151,7 @@ def test_run_stops_when_not_ready_and_summarizes(monkeypatch):
     r = CliRunner().invoke(cli.app, ["run", "-s", "005930", "--eval-limit", "5"])
     assert r.exit_code == 1
     assert "✅ 3. 색인" in r.output and "❌ 6. 평가" in r.output
-    assert calls[0] == (["005930"], 2022, 2024, False)
+    assert calls[0] == (["005930"], *cli.year_range(None, None), False)
     assert calls[-1][2] == 5
     calls.clear()
     r = CliRunner().invoke(cli.app, ["run", "--eval-limit", "0"])
@@ -185,3 +240,31 @@ def test_llm_fallback_check():
         assert not c.ok and not c.required
     # 대체 모델이 없거나 받지 않았어도 준비 완료로 본다
     assert all_ok([Check("Ollama 대체 모델", False, required=False)])
+
+
+def test_year_range_defaults_to_recent_years():
+    from datetime import date
+
+    assert cli.year_range(None, None, date(2026, 10, 9)) == (2023, 2026)
+    assert cli.year_range(2020, None, date(2026, 10, 9)) == (2020, 2026)
+    assert cli.year_range(None, 2024, date(2026, 10, 9)) == (2021, 2024)
+    assert cli.year_range(2022, 2024) == (2022, 2024)
+
+
+def test_run_skips_later_steps_when_collection_stops(monkeypatch):
+    from typer.testing import CliRunner
+
+    calls = []
+    monkeypatch.setattr(doctor, "run_checks", lambda *a, **k: [Check("x", True)])
+
+    def stopped(*a, **k):
+        calls.append("collect")
+        raise cli.typer.Exit(cli.COLLECT_STOPPED)
+
+    monkeypatch.setattr(cli, "collect_cmd", stopped)
+    for name in ("parse", "index", "feed_poll", "eval_generate", "eval_run"):
+        monkeypatch.setattr(cli, name, lambda *a, n=name, **k: calls.append(n))
+    r = CliRunner().invoke(cli.app, ["run"])
+    assert r.exit_code == 1 and calls == ["collect"]
+    assert "건너뜁니다" in r.output and "❌ 1. 수집" in r.output
+    assert "2. 파싱" not in r.output

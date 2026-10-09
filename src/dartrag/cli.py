@@ -1,4 +1,5 @@
 import logging
+from datetime import date
 from pathlib import Path
 from typing import Annotated
 
@@ -6,7 +7,7 @@ import typer
 
 from dartrag.bench import SLO_FIRST_TOKEN_S, SLO_TOTAL_P95_S
 from dartrag.config import get_settings
-from dartrag.dart import DartApiError, OpenDartClient
+from dartrag.dart import DartApiError, DartHttpError, OpenDartClient
 from dartrag.db import Repository
 from dartrag.pipeline.collect import collect
 from dartrag.pipeline.parse import parse_filings
@@ -34,6 +35,18 @@ DEFAULT_STOCKS = [
     "012330",  # 현대모비스
 ]
 
+# 수집을 하나도 하지 못하고 멈췄을 때의 종료 코드. dartrag run 은 이때 나머지 단계를 건너뛴다
+COLLECT_STOPPED = 2
+
+StartYear = Annotated[int | None, typer.Option(help="첫 사업연도. 기본: 올해 - 3")]
+EndYear = Annotated[int | None, typer.Option(help="마지막 사업연도. 기본: 올해")]
+
+
+def year_range(start_year: int | None, end_year: int | None, today: date | None = None):
+    """기본 수집 기간: 최근 3개 사업연도와 올해 나온 분기·반기 보고서 (2026년이면 2023~2026)."""
+    end = end_year or (today or date.today()).year
+    return (start_year or end - 3), end
+
 
 @app.command()
 def migrate():
@@ -45,11 +58,12 @@ def migrate():
 @app.command("collect")
 def collect_cmd(
     stocks: Annotated[list[str] | None, typer.Option("--stock", "-s", help="종목코드")] = None,
-    start_year: int = 2022,
-    end_year: int = 2024,
+    start_year: StartYear = None,
+    end_year: EndYear = None,
     no_documents: bool = False,
 ):
     """정기공시 원문과 재무제표 수집."""
+    start_year, end_year = year_range(start_year, end_year)
     logging.basicConfig(level=logging.INFO)
     # httpx 요청 로그에는 인증키가 쿼리 문자열로 찍히므로 끈다
     logging.getLogger("httpx").setLevel(logging.WARNING)
@@ -72,7 +86,10 @@ def collect_cmd(
         typer.echo(f"OpenDART 오류로 수집을 멈췄습니다: {e}", err=True)
         if e.status == "800":
             typer.echo("OpenDART 시스템 점검 중입니다. 점검이 끝난 뒤 다시 실행하세요.", err=True)
-        raise typer.Exit(1) from None
+        raise typer.Exit(COLLECT_STOPPED) from None
+    except DartHttpError as e:
+        typer.echo(f"OpenDART 에 연결하지 못해 수집을 멈췄습니다: {e}", err=True)
+        raise typer.Exit(COLLECT_STOPPED) from None
     typer.echo(
         f"기업 {summary.companies}, 공시 {summary.filings}, "
         f"원문 신규 {summary.documents_downloaded} / 캐시 {summary.documents_cached}, "
@@ -82,6 +99,8 @@ def collect_cmd(
         typer.echo(f"건너뜀: {line}")
     for line in summary.errors:
         typer.echo(f"오류: {line}", err=True)
+    if summary.errors and not summary.filings:
+        raise typer.Exit(COLLECT_STOPPED)
     raise typer.Exit(1 if summary.errors else 0)
 
 
@@ -927,8 +946,8 @@ def _step(name: str, fn, *args, **kwargs) -> tuple[str, int, float]:
 @app.command("run")
 def run_all(
     stocks: Annotated[list[str] | None, typer.Option("--stock", "-s", help="종목코드")] = None,
-    start_year: int = 2022,
-    end_year: int = 2024,
+    start_year: StartYear = None,
+    end_year: EndYear = None,
     feed_days: int = 30,
     eval_limit: Annotated[int, typer.Option(help="평가 문항 수. 0 이면 평가 생략")] = 40,
 ):
@@ -942,13 +961,20 @@ def run_all(
         typer.echo("\n준비가 덜 됐습니다. ❌ 항목을 고친 뒤 다시 실행하세요.", err=True)
         raise typer.Exit(1)
 
-    results = [
-        _step("1. 수집", collect_cmd, stocks, start_year, end_year, False),
-        _step("2. 파싱", parse),
-        _step("3. 색인", index),
-        _step("4. 공시 피드", feed_poll, feed_days, 0, False),
-    ]
-    if eval_limit:
+    start_year, end_year = year_range(start_year, end_year)
+    typer.echo(f"\n수집 기간: {start_year}~{end_year} 사업연도")
+    results = [_step("1. 수집", collect_cmd, stocks, start_year, end_year, False)]
+    stopped = results[0][1] == COLLECT_STOPPED
+    if stopped:
+        # 받은 공시가 없으면 파싱·색인·평가는 빈 데이터로 돌 뿐이다
+        typer.echo("\n수집을 하나도 하지 못해 나머지 단계는 건너뜁니다.", err=True)
+    else:
+        results += [
+            _step("2. 파싱", parse),
+            _step("3. 색인", index),
+            _step("4. 공시 피드", feed_poll, feed_days, 0, False),
+        ]
+    if eval_limit and not stopped:
         generated = Path("eval/generated.jsonl")
         results.append(_step("5. 평가 문항 생성", eval_generate, generated, 8, 0))
         files = [Path("eval/manual.jsonl")] + ([generated] if generated.exists() else [])
