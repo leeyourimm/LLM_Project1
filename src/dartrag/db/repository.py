@@ -603,9 +603,49 @@ class Repository:
         self.conn.commit()
 
     def users(self) -> list[tuple[int, str, object, object]]:
+        """가입한 계정 (체험 계정은 빼고)."""
         return self.conn.execute(
-            "SELECT id, email, created_at, last_login_at FROM users ORDER BY id"
+            """SELECT id, email, created_at, last_login_at FROM users
+               WHERE guest_expires_at IS NULL ORDER BY id"""
         ).fetchall()
+
+    # --- 체험 계정 (가입 없이 체험하기) ------------------------------------
+
+    def create_guest(self, expires_at) -> int:
+        """이메일·비밀번호 없는 체험 계정. expires_at 이 지나면 로그인이 끊기고 지울 대상이 된다."""
+        row = self.conn.execute(
+            "INSERT INTO users (guest_expires_at) VALUES (%s) RETURNING id", (expires_at,)
+        ).fetchone()
+        self.conn.commit()
+        return row[0]
+
+    def upgrade_guest(self, user_id: int, email: str, password_hash: str) -> bool:
+        """체험 중에 가입: 같은 계정에 이메일·비밀번호를 넣어 대화 기록 등을 그대로 이어 쓴다.
+
+        체험 계정의 로그인은 모두 끊는다 (부른 쪽이 새 세션을 만든다). 이미 가입된 이메일이거나
+        체험 계정이 아니거나 기한이 지났으면 False."""
+        try:
+            cur = self.conn.execute(
+                """UPDATE users SET email = %s, password_hash = %s, guest_expires_at = NULL
+                   WHERE id = %s AND guest_expires_at > now()""",
+                (email, password_hash, user_id),
+            )
+            if cur.rowcount:
+                self.conn.execute("DELETE FROM sessions WHERE user_id = %s", (user_id,))
+            self.conn.commit()
+        except psycopg.errors.UniqueViolation:
+            self.conn.rollback()
+            return False
+        return cur.rowcount > 0
+
+    def expired_guests(self, limit: int = 500) -> list[int]:
+        """기한이 지난 체험 계정 id (오래된 것부터)."""
+        rows = self.conn.execute(
+            """SELECT id FROM users WHERE guest_expires_at <= now()
+               ORDER BY guest_expires_at, id LIMIT %s""",
+            (limit,),
+        ).fetchall()
+        return [r[0] for r in rows]
 
     def remove_user(self, email: str) -> bool:
         """이메일로 계정 삭제 (CLI). 화면의 탈퇴와 같은 delete_user 를 쓴다."""
@@ -738,10 +778,14 @@ class Repository:
         self.conn.execute("DELETE FROM sessions WHERE expires_at < now()")
         self.conn.commit()
 
-    def session_user(self, token_hash: str) -> tuple[int, str] | None:
+    def session_user(self, token_hash: str) -> tuple[int, str | None, object] | None:
+        """(사용자 id, 이메일, 체험 계정이 끝나는 시각). 가입한 계정이면 끝나는 시각은 None,
+        체험 계정이면 이메일이 None. 기한이 지난 체험 계정은 지우기 전이라도 로그인되지 않는다."""
         return self.conn.execute(
-            """SELECT u.id, u.email FROM sessions s JOIN users u ON u.id = s.user_id
-               WHERE s.token_hash = %s AND s.expires_at > now()""",
+            """SELECT u.id, u.email, u.guest_expires_at
+               FROM sessions s JOIN users u ON u.id = s.user_id
+               WHERE s.token_hash = %s AND s.expires_at > now()
+                 AND (u.guest_expires_at IS NULL OR u.guest_expires_at > now())""",
             (token_hash,),
         ).fetchone()
 
@@ -1528,12 +1572,17 @@ class Repository:
                 "SELECT severity, count(*) FROM data_issues GROUP BY severity"
             ).fetchall()
         )
-        users = self.conn.execute("SELECT count(*) FROM users").fetchone()[0]
+        users, guests = self.conn.execute(
+            """SELECT count(*) FILTER (WHERE guest_expires_at IS NULL),
+                      count(*) FILTER (WHERE guest_expires_at > now())
+               FROM users"""
+        ).fetchone()
         out = {
             "jobs": jobs,
             "ingest_backlog": self.ingest_backlog()["pending"],
             "issues": {"error": issues.get("error", 0), "warn": issues.get("warn", 0)},
             "users": users,
+            "guests": guests,
         }
         if latest := self.latest_eval_run():
             out["eval"] = latest

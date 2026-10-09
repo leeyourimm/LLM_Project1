@@ -74,11 +74,14 @@ def make_dependency(
     rules: list[Rule],
     user_dep: Callable,
     when: Callable[[Request], bool] | None = None,
+    who: Callable[[Request, object], str | None] | None = None,
 ) -> Callable:
     """FastAPI 의존성. 라우트에 dependencies=[Depends(...)] 로 붙인다.
 
     user_dep 는 로그인하지 않았어도 오류 없이 None 을 돌려줘야 한다.
-    when 이 있으면 그 조건일 때만 센다 (예: PDF 에 요약을 넣을 때만)."""
+    when 이 있으면 그 조건일 때만 센다 (예: PDF 에 요약을 넣을 때만).
+    who(request, user) 가 있으면 client_key 대신 그 값으로 센다. None 을 돌려주면 세지 않는다
+    (예: 체험 계정의 요청만 접속 주소별로)."""
     from typing import Annotated
 
     from fastapi import Depends
@@ -86,7 +89,10 @@ def make_dependency(
     def check(request: Request, user: Annotated[object, Depends(user_dep)] = None) -> None:
         if when is not None and not when(request):
             return
-        hit = limiter.hit(scope, client_key(request, user), rules)
+        key = client_key(request, user) if who is None else who(request, user)
+        if key is None:
+            return
+        hit = limiter.hit(scope, key, rules)
         if hit is None:
             return
         rule, reset = hit

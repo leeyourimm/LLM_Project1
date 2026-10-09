@@ -295,7 +295,7 @@ def test_users_sessions_and_user_watchlist(repo):
     soon = datetime.now(UTC) + timedelta(days=1)
     repo.create_session("a" * 64, uid, soon)
     repo.create_session("b" * 64, uid, datetime.now(UTC) - timedelta(seconds=1))
-    assert repo.session_user("a" * 64) == (uid, "a@b.co")
+    assert repo.session_user("a" * 64) == (uid, "a@b.co", None)
     assert repo.session_user("b" * 64) is None  # 만료
     assert repo.users()[0][3] is not None  # 마지막 로그인 시각
 
@@ -688,7 +688,7 @@ def test_delete_user_leaves_no_rows(repo):
     assert _count(repo, "users", "id", a["uid"]) == 0
     # 다른 사용자의 기록과 공시는 그대로
     assert repo.export_user(b["uid"])["conversations"][0]["messages"][1]["feedback"]
-    assert repo.session_user("c" * 64) == (b["uid"], "c@d.co")
+    assert repo.session_user("c" * 64) == (b["uid"], "c@d.co", None)
     assert _count(repo, "disclosures") == 1
 
     # CLI(dartrag user remove)도 같은 삭제 경로를 쓴다
@@ -1010,3 +1010,64 @@ def test_filing_freshness_and_dashboard_targets(repo):
         ("00164779", "SK하이닉스", "000660"),
     ]
     assert repo.companies_by_code(["00126380", "99999999"]) == [("00126380", "삼성전자", "005930")]
+
+
+def test_guest_accounts(repo):
+    from datetime import UTC, datetime, timedelta
+
+    from dartrag.accounts import purge_expired_guests
+
+    class Spy:
+        def __init__(self):
+            self.forgotten = []
+
+        def forget_user(self, uid):
+            self.forgotten.append(uid)
+
+    repo.upsert_companies([Corp(corp_code="00126380", corp_name="삼성전자", stock_code="005930")])
+    now = datetime.now(UTC)
+    member = repo.create_user("a@b.co", "scrypt$hash")
+    live = repo.create_guest(now + timedelta(hours=24))
+    old = repo.create_guest(now - timedelta(minutes=1))
+    repo.migrate()  # 다시 돌려도 된다 (015 포함)
+    repo.migrate()
+    for i, uid in enumerate((live, old)):
+        repo.create_session(f"{i}" * 64, uid, now + timedelta(hours=24))
+        conv = repo.create_conversation(uid, "체험 질문")
+        repo.add_message(conv, "user", "삼성전자 매출은?", {"context": {}})
+        repo.set_watch("00126380", 2, uid)
+
+    # 체험 계정: 이메일 없음, 끝나는 시각 함께. 기한이 지나면 지우기 전이라도 로그인되지 않는다
+    session = repo.session_user("0" * 64)
+    assert session[:2] == (live, None) and session[2] > now
+    assert repo.session_user("1" * 64) is None
+    assert [u[0] for u in repo.users()] == [member]  # 계정 목록·사용자 수에서 뺀다
+    snap = repo.ops_snapshot()
+    assert snap["users"] == 1 and snap["guests"] == 1
+    assert repo.expired_guests() == [old]
+
+    # 가입한 계정에는 이메일·비밀번호가 꼭 있어야 한다
+    with pytest.raises(psycopg.errors.CheckViolation):
+        repo.conn.execute("INSERT INTO users (email) VALUES ('x@y.co')")
+    repo.conn.rollback()
+
+    # 기한이 지난 체험 계정은 탈퇴와 같은 경로로 지운다
+    spy = Spy()
+    assert purge_expired_guests(repo, spy) == 1 and spy.forgotten == [old]
+    for table, column in _user_references(repo):
+        assert _count(repo, table, column, old) == 0, table
+    assert _count(repo, "users", "id", old) == 0 and repo.expired_guests() == []
+    assert repo.conversations(live) and repo.watchlist(live)
+
+    # 체험 중 가입: 이미 있는 이메일이면 그대로, 아니면 같은 계정이 가입 계정이 된다
+    assert repo.upgrade_guest(live, "a@b.co", "scrypt$x") is False
+    assert repo.session_user("0" * 64)[2] is not None  # 실패해도 트랜잭션이 깨지지 않는다
+    assert repo.upgrade_guest(live, "me@b.co", "scrypt$me") is True
+    assert repo.session_user("0" * 64) is None  # 체험하던 세션은 끊는다
+    assert repo.user_by_email("me@b.co") == (live, "me@b.co", "scrypt$me")
+    repo.create_session("2" * 64, live, now + timedelta(days=30))
+    assert repo.session_user("2" * 64) == (live, "me@b.co", None)
+    assert [c["title"] for c in repo.conversations(live)] == ["체험 질문"]
+    assert repo.upgrade_guest(live, "again@b.co", "h") is False  # 이미 가입 계정
+    assert repo.upgrade_guest(member, "z@b.co", "h") is False
+    assert repo.ops_snapshot()["guests"] == 0 and len(repo.users()) == 2

@@ -125,7 +125,7 @@ class StateCollector:
     """Prometheus 가 가져갈 때마다 DB·Redis 의 현재 상태를 읽는 수집기.
 
     snapshot() 은 {"jobs": [...], "ingest_backlog": n, "issues": {...},
-    "dart_calls_today": n, "users": n} 형태를 돌려준다. 실패하면 그 회차는 건너뛴다.
+    "dart_calls_today": n, "users": n, "guests": n} 형태를 돌려준다. 실패하면 그 회차는 건너뛴다.
     """
 
     def __init__(self, snapshot: Callable[[], dict]):
@@ -209,3 +209,7 @@ class StateCollector:
             users = GaugeMetricFamily("dartrag_users", "가입한 사용자 수")
             users.add_metric([], s["users"])
             yield users
+        if "guests" in s:
+            guests = GaugeMetricFamily("dartrag_guests", "기한이 남은 체험 계정 수")
+            guests.add_metric([], s["guests"])
+            yield guests

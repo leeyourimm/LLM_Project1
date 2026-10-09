@@ -280,3 +280,47 @@ def test_celery_schedule():
     assert routes["dartrag.ingest"]["queue"] == "dart"
     assert routes["dartrag.process"]["queue"] == "process"
     assert {"dartrag.feed_poll", "dartrag.maintenance", "dartrag.evaluate"} <= set(app.tasks)
+
+
+def test_purge_guests_job_uses_account_deletion(monkeypatch):
+    from datetime import UTC, timedelta
+
+    from tests.test_web import FakeRepo
+
+    class Repo(FakeRepo, JobRepo):
+        def __init__(self):
+            FakeRepo.__init__(self)
+            JobRepo.__init__(self)
+
+    class Spy:
+        def __init__(self):
+            self.forgotten = []
+
+        def forget_user(self, uid):
+            self.forgotten.append(uid)
+
+    spy = Spy()
+    monkeypatch.setattr("dartrag.obs.tracing.get_tracer", lambda settings: spy)
+    repo = Repo()
+    now = datetime.now(UTC)
+    old = repo.create_guest(now - timedelta(minutes=1))
+    live = repo.create_guest(now + timedelta(hours=1))
+    member = repo.create_user("a@b.co", "scrypt$x")
+    cid = repo.create_conversation(old, "체험 질문")
+    ctx = make_ctx(repo)
+    assert jobs.run_job(ctx, "purge_guests", jobs.purge_guests) == {"guests": 1}
+    assert old not in repo.users and cid not in repo.convs and spy.forgotten == [old]
+    assert live in repo.users and member in repo.users
+    assert repo.jobs[1][:2] == ["purge_guests", "ok"]
+
+
+def test_celery_schedules_guest_purge_and_example_warm():
+    from dartrag.worker.celery_app import app
+
+    schedule = app.conf.beat_schedule
+    assert schedule["purge-guests"]["task"] == "dartrag.purge_guests"
+    assert schedule["purge-guests"]["schedule"] == 1800
+    assert schedule["warm-examples"]["task"] == "dartrag.warm_examples"
+    assert schedule["warm-examples"]["schedule"] == 1800  # EXAMPLE_WARM_MINUTES 기본 30분
+    assert app.conf.task_routes["dartrag.warm_examples"]["queue"] == "process"
+    assert {"dartrag.purge_guests", "dartrag.warm_examples"} <= set(app.tasks)

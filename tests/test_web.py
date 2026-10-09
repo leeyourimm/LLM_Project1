@@ -32,6 +32,8 @@ class FakeRepo:
     def __init__(self):
         self.watch = {}
         self.users = {}
+        self.user_seq = 0
+        self.guests = {}  # 체험 계정: uid → 끝나는 시각
         self.sessions = {}
         self.convs = {}
         self.msg_seq = 0
@@ -85,9 +87,31 @@ class FakeRepo:
     def create_user(self, email, password_hash):
         if any(e == email for e, _ in self.users.values()):
             return None
-        uid = len(self.users) + 1
+        self.user_seq += 1
+        self.users[self.user_seq] = (email, password_hash)
+        return self.user_seq
+
+    # 체험 계정
+    def create_guest(self, expires_at):
+        self.user_seq += 1
+        self.users[self.user_seq] = (None, None)
+        self.guests[self.user_seq] = expires_at
+        return self.user_seq
+
+    def upgrade_guest(self, uid, email, password_hash):
+        until = self.guests.get(uid)
+        if until is None or until <= datetime.now(UTC):
+            return False
+        if any(e == email for e, _ in self.users.values()):
+            return False
         self.users[uid] = (email, password_hash)
-        return uid
+        del self.guests[uid]
+        self.sessions = {t: u for t, u in self.sessions.items() if u != uid}
+        return True
+
+    def expired_guests(self, limit=500):
+        now = datetime.now(UTC)
+        return sorted(u for u, until in self.guests.items() if until <= now)[:limit]
 
     def user_by_email(self, email):
         return next(((i, e, h) for i, (e, h) in self.users.items() if e == email), None)
@@ -102,7 +126,12 @@ class FakeRepo:
 
     def session_user(self, token_hash):
         uid = self.sessions.get(token_hash)
-        return (uid, self.users[uid][0]) if uid else None
+        if not uid:
+            return None
+        until = self.guests.get(uid)
+        if until is not None and until <= datetime.now(UTC):
+            return None  # 기한이 지난 체험 계정
+        return uid, self.users[uid][0], until
 
     def delete_session(self, token_hash):
         self.sessions.pop(token_hash, None)
@@ -144,6 +173,7 @@ class FakeRepo:
     def delete_user(self, uid):
         if self.users.pop(uid, None) is None:
             return False
+        self.guests.pop(uid, None)
         self.sessions = {t: u for t, u in self.sessions.items() if u != uid}
         self.watch = {k: v for k, v in self.watch.items() if k[0] != uid}
         self.channels = {k: v for k, v in self.channels.items() if k[0] != uid}
@@ -732,6 +762,8 @@ def test_local_mode_needs_no_login(ctx):
     assert client.get("/api/auth/me").json() == {
         "auth_required": False,
         "allow_signup": True,
+        "allow_guest": False,
+        "guest_hours": None,
         "email_enabled": False,
         "email_verification_required": False,
         "user": None,

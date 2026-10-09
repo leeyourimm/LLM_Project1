@@ -12,6 +12,8 @@
 새 정기보고서가 공시되면: 피드(10분마다) → 수집(5분마다) → 처리 → 알림 순으로 이어져
 30분 안에 검색·요약·알림까지 반영된다. 처리가 끝난 회사는 기업 대시보드도 미리 만들어 두고,
 관심 종목 회사의 대시보드는 주기적으로(DASHBOARD_WARM_MINUTES) 바뀐 것만 다시 만든다.
+채팅 첫 화면 예시 질문의 답도 주기적으로(EXAMPLE_WARM_MINUTES) 데이터가 바뀐 것만 다시 만들고,
+기한이 지난 체험 계정은 30분마다 지운다.
 """
 
 import logging
@@ -41,6 +43,8 @@ app.conf.update(
         "dartrag.process": {"queue": "process"},
         "dartrag.process_backlog": {"queue": "process"},
         "dartrag.evaluate": {"queue": "process"},
+        # 예시 답변은 임베딩·리랭커와 답변 모델을 쓴다
+        "dartrag.warm_examples": {"queue": "process"},
     },
     timezone="Asia/Seoul",
     task_acks_late=True,  # 작업자가 죽으면 다른 작업자가 다시 받는다
@@ -100,6 +104,9 @@ def process(corp_codes: list[str]):
     send_alerts.delay()
     # 새 재무 수치·검증 결과가 반영된 대시보드를 사용자가 열기 전에 만들어 둔다
     warm_dashboards.delay(corp_codes)
+    # 색인으로 데이터 버전이 올라 예시 질문의 캐시된 답이 쓰이지 않게 됐으므로 다시 넣는다
+    if settings.example_warm_minutes > 0:
+        warm_examples.delay()
     return result
 
 
@@ -120,6 +127,18 @@ def warm_dashboards(corp_codes: list[str] | None = None):
         lock_seconds=1800,
         corp_codes=corp_codes,
     )
+
+
+@app.task(name="dartrag.warm_examples")
+def warm_examples():
+    """예시 질문의 답을 답변 캐시에 미리 넣기 (데이터 버전이 바뀐 것만 다시 만든다)."""
+    # CPU 서버에서는 질문 하나에 몇 분 걸릴 수 있다
+    return _run("warm_examples", jobs.warm_examples, lock_seconds=3 * 3600)
+
+
+@app.task(name="dartrag.purge_guests")
+def purge_guests():
+    return _run("purge_guests", jobs.purge_guests)
 
 
 @app.task(name="dartrag.send_alerts")
@@ -165,6 +184,8 @@ app.conf.beat_schedule = {
         "schedule": _every(settings.dashboard_warm_minutes),
     },
     "backfill": {"task": "dartrag.backfill", "schedule": _every(30)},
+    # 기한이 지난 체험 계정 정리 (로그인은 기한에 바로 끊기고, 기록은 이때 지운다)
+    "purge-guests": {"task": "dartrag.purge_guests", "schedule": _every(30)},
     "process-backlog": {"task": "dartrag.process_backlog", "schedule": _every(15)},
     # 새벽에: 전체 검증, 보관 기간 정리
     "validate": {"task": "dartrag.validate", "schedule": crontab(hour=4, minute=10)},
@@ -175,3 +196,9 @@ app.conf.beat_schedule = {
         "schedule": crontab(hour=2, minute=0, day_of_week="sun"),
     },
 }
+# 예시 질문 답변 미리 넣기 (EXAMPLE_WARM_MINUTES=0 이면 끔)
+if settings.example_warm_minutes > 0:
+    app.conf.beat_schedule["warm-examples"] = {
+        "task": "dartrag.warm_examples",
+        "schedule": _every(settings.example_warm_minutes),
+    }

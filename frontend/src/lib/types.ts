@@ -9,11 +9,22 @@ export interface Company {
 export interface AuthInfo {
   auth_required: boolean;
   allow_signup: boolean;
+  // 로그인 화면에 "가입 없이 체험하기"를 보일지, 체험 계정을 몇 시간 쓰는지
+  allow_guest?: boolean;
+  guest_hours?: number | null;
   // 서버에 메일 발송(SMTP)이 설정됐는지: 비밀번호 재설정, 이메일 인증에 필요
   email_enabled?: boolean;
   // 가입 이메일을 인증해야 이메일 알림을 켤 수 있는지
   email_verification_required?: boolean;
-  user: { email: string; email_verified?: boolean } | null;
+  user: AuthUser | null;
+}
+
+// 체험 계정은 이메일이 없고(null) guest 와 지워지는 시각이 온다
+export interface AuthUser {
+  email: string | null;
+  email_verified?: boolean;
+  guest?: boolean;
+  guest_expires_at?: string;
 }
 
 // 위치([시작, 끝))는 백엔드(파이썬) 문자열 기준이라 유니코드 코드 포인트 단위다 (lib/passage.ts)
@@ -239,7 +250,7 @@ export interface TwoFactorSetup {
 
 // 로그인·비밀번호 재설정 응답: 2단계 인증을 켠 계정이면 user 대신 two_factor
 export interface LoginResult {
-  user?: { email: string; email_verified?: boolean };
+  user?: AuthUser;
   two_factor?: boolean;
   method?: "totp" | "recovery";
   recovery_codes_left?: number;

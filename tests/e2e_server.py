@@ -2,11 +2,12 @@
 
 실제 FastAPI 앱과 실제 Postgres(E2E_DATABASE_URL)를 쓰고, 검색과 언어 모델만 가짜로 바꾼다.
 답변 신뢰도의 최신 공시 비교를 확인할 수 있게 회사 하나와 정기공시 두 건을 넣어 둔다 (seed).
-로그인을 켠 공개 서버 설정(AUTH_REQUIRED, 가입 허용)으로 띄운다.
+로그인을 켠 공개 서버 설정(AUTH_REQUIRED, 가입 허용, 가입 없이 체험하기)으로 띄운다.
 
     E2E_DATABASE_URL=postgresql://… python -m tests.e2e_server
 
-탈퇴할 때 추적 삭제를 요청했는지 화면 테스트에서 확인할 수 있게 /api/_e2e/forgotten 을,
+탈퇴하거나 체험을 끝낼 때 추적 삭제를 요청했는지 화면 테스트에서 확인할 수 있게
+/api/_e2e/forgotten 을,
 계정 메일(인증, 비밀번호 재설정)의 링크를 열어 볼 수 있게 /api/_e2e/mail 을,
 웹 푸시 시험 알림이 나갔는지 볼 수 있게 /api/_e2e/push 를 연다.
 메일과 웹 푸시는 실제로 보내지 않고 메모리에만 담는다.
@@ -150,6 +151,7 @@ def build(url: str, origin: str):
         lambda r: FakeRetriever(),
         auth_required=True,
         allow_signup=True,
+        allow_guest=True,
         cookie_secure=False,
         allowed_origins=(origin,),
         tracer=lambda: spy,

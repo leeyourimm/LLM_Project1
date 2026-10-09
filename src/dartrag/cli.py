@@ -447,6 +447,8 @@ JOB_NAMES = (
     "validate",
     "maintenance",
     "evaluate",
+    "warm_examples",
+    "purge_guests",
 )
 
 
@@ -493,11 +495,11 @@ def jobs_status():
     for name in JOB_NAMES:
         r = runs.get(name)
         if r is None:
-            typer.echo(f"{name:12} 실행 기록 없음")
+            typer.echo(f"{name:13} 실행 기록 없음")
             continue
         last_ok = f"{r['last_ok']:%m-%d %H:%M}" if r["last_ok"] else "-"
         typer.echo(
-            f"{name:12} 마지막 {r['last_started']:%m-%d %H:%M} ({r['last_status']})"
+            f"{name:13} 마지막 {r['last_started']:%m-%d %H:%M} ({r['last_status']})"
             f" · 마지막 성공 {last_ok}"
         )
     typer.echo(f"\n새 정기보고서 처리 대기 {backlog['pending']}건, 멈춘 것 {backlog['failed']}건")
@@ -1060,7 +1062,7 @@ def user_two_factor_off(email: str):
 
 @user_app.command("list")
 def user_list():
-    """계정 목록."""
+    """가입한 계정 목록 (체험 계정은 빼고)."""
     rows = Repository.connect(get_settings().database_url).users()
     if not rows:
         typer.echo("계정이 없습니다. dartrag user add 이메일 로 만드세요.")
@@ -1074,6 +1076,59 @@ def user_remove(email: str):
     """계정 삭제 (화면의 탈퇴와 같은 경로: 관심 종목, 알림 설정, 대화 기록, 세션까지)."""
     removed = Repository.connect(get_settings().database_url).remove_user(email.strip().lower())
     typer.echo(f"{email} {'삭제' if removed else '없는 계정'}")
+
+
+cache_app = typer.Typer(help="답변 캐시")
+app.add_typer(cache_app, name="cache")
+
+
+@cache_app.command("warm")
+def cache_warm():
+    """채팅 첫 화면 예시 질문(EXAMPLE_QUESTIONS)의 답을 답변 캐시에 미리 넣기.
+
+    CPU 만 있는 서버에서는 첫 답변에 1분 넘게 걸리므로, 예시를 누르면 바로 답하게 해 둔다.
+    지금 데이터 버전의 답이 이미 있는 질문은 건너뛴다. 작업자(beat)를 켜 두면 새 공시를 색인해
+    데이터가 바뀔 때 저절로 다시 넣는다."""
+    from dartrag.worker import jobs
+
+    logging.getLogger("httpx").setLevel(logging.WARNING)
+    settings = get_settings()
+    if not (settings.answer_cache and settings.redis_url):
+        typer.echo(
+            "답변 캐시가 꺼져 있어 미리 넣을 곳이 없습니다. "
+            "Redis(REDIS_URL)를 설정하고 ANSWER_CACHE=true 로 두면 씁니다."
+        )
+        return
+    ctx = jobs.Context.from_settings(settings)
+    try:
+        ctx.redis.ping()
+    except Exception as e:  # noqa: BLE001 - 주소(비밀번호 포함 가능)는 출력하지 않는다
+        typer.echo(
+            f"Redis 에 연결할 수 없습니다 ({type(e).__name__}). make up 으로 Redis 를 띄웠는지, "
+            "REDIS_URL 이 맞는지 확인하세요.",
+            err=True,
+        )
+        raise typer.Exit(1) from None
+    count = len(settings.examples)
+    typer.echo(f"예시 질문 {count}개를 확인합니다. 새로 답하는 질문은 오래 걸립니다.")
+    try:
+        result = jobs.run_job(
+            ctx,
+            "warm_examples",
+            lambda c, r: jobs.warm_examples(c, r, echo=typer.echo),
+            lock_seconds=3 * 3600,
+        )
+    except jobs.JobSkipped:
+        typer.echo("작업자가 지금 예시 답변을 넣고 있습니다. 끝난 뒤 다시 해 보세요.", err=True)
+        raise typer.Exit(1) from None
+    if "skipped" in result:
+        typer.echo(f"건너뜀: {result['skipped']}")
+        return
+    typer.echo(
+        f"새로 넣음 {result['built']}개, 이미 있음 {result['fresh']}개, "
+        f"실패 {len(result['errors'])}개"
+    )
+    raise typer.Exit(1 if result["errors"] else 0)
 
 
 feedback_app = typer.Typer(help="사용자 답변 평가")

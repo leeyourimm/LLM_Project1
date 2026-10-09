@@ -8,7 +8,7 @@ from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 
-from dartrag.config import Settings
+from dartrag.config import DEFAULT_EXAMPLES, Settings
 from dartrag.dashboard import DashboardCache
 from dartrag.db import Repository
 
@@ -25,6 +25,11 @@ class Services:
     session_days: int = 30
     # 가입한 이메일을 인증해야 이메일 알림을 켤 수 있다 (메일 발송이 설정된 경우에만 적용)
     email_verification_required: bool = False
+    # 가입 없이 체험하기 (로그인을 켰을 때만): 체험 계정을 열지, 몇 시간 동안 쓰게 할지
+    allow_guest: bool = False
+    guest_hours: int = 24
+    # 채팅 첫 화면의 예시 질문 (작업자가 답을 답변 캐시에 미리 넣어 둔다)
+    examples: tuple[str, ...] = DEFAULT_EXAMPLES
     report_font: str | None = None  # PDF 리포트용 한글 TTF 경로 (없으면 자동 탐색)
     # 알림: 발송 수단({"email": …, "telegram": …}), 변경점 요약용 LLM
     senders: Callable[[], dict] = dict
@@ -33,7 +38,8 @@ class Services:
     secret_key: str = ""
     telegram_bot_username: str = ""
     telegram_webhook_secret: str = ""
-    # 요청 한도: 범위(ask, heavy, auth) → 규칙들. 비어 있으면 제한하지 않는다
+    # 요청 한도: 범위(ask, heavy, auth, guest) → 규칙들. 비어 있으면 제한하지 않는다.
+    # "guest:ask" 처럼 guest: 를 붙인 범위는 체험 계정에만 더하는 규칙 (접속 주소별로 센다)
     limits: dict = field(default_factory=dict)
     redis: Callable[[], object] | None = None
     # 운영 지표: /metrics 보호용 토큰, DB·Redis 상태 읽기
@@ -78,6 +84,9 @@ def default_services(settings: Settings) -> Services:
         cookie_secure=settings.cookie_secure,
         session_days=settings.session_days,
         email_verification_required=settings.email_verification_required,
+        allow_guest=settings.allow_guest,
+        guest_hours=settings.guest_hours,
+        examples=settings.examples,
         report_font=settings.report_font,
         senders=cache(lambda: build_senders(settings)),
         llm=cache(lambda: build_llm(settings)),
@@ -108,6 +117,30 @@ def rate_limits(settings: Settings) -> dict:
         ],
         "heavy": [Rule(s.rate_heavy_per_hour, 3600, f"1시간에 {s.rate_heavy_per_hour}번")],
         "auth": [Rule(s.rate_auth_per_hour, 3600, f"1시간에 {s.rate_auth_per_hour}번")],
+        # 체험 계정 만들기 (접속 주소별)
+        "guest": [
+            Rule(
+                s.rate_guest_per_hour,
+                3600,
+                f"체험 계정 만들기는 1시간에 {s.rate_guest_per_hour}번",
+            )
+        ],
+        # 체험 계정에만 더하는 한도 (회원 한도보다 낮게)
+        "guest:ask": [
+            Rule(
+                s.rate_guest_ask_per_minute,
+                60,
+                f"체험 계정은 1분에 {s.rate_guest_ask_per_minute}번",
+            ),
+            Rule(s.rate_guest_ask_per_day, 86400, f"체험 계정은 하루 {s.rate_guest_ask_per_day}번"),
+        ],
+        "guest:heavy": [
+            Rule(
+                s.rate_guest_heavy_per_hour,
+                3600,
+                f"체험 계정은 1시간에 {s.rate_guest_heavy_per_hour}번",
+            )
+        ],
     }
 
 

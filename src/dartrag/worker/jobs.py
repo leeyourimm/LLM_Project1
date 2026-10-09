@@ -189,6 +189,32 @@ def warm_dashboards(ctx: Context, repo, corp_codes: list[str] | None = None):
     return {"companies": len(companies)} | warm_companies(cache, repo, companies)
 
 
+def warm_examples(ctx: Context, repo, echo=None):
+    """채팅 첫 화면 예시 질문(EXAMPLE_QUESTIONS)의 답을 답변 캐시에 미리 넣는다.
+
+    답변 캐시 키에 데이터 버전이 들어 있어 새 공시를 색인하면 예전 답은 쓰이지 않는다.
+    그래서 주기마다 지금 버전의 답이 있는지 보고 없는 질문만 다시 만든다."""
+    from dartrag.answer.examples import warm
+    from dartrag.factory import build_answerer
+
+    s = ctx.settings
+    if not (s.answer_cache and s.redis_url):
+        return {"skipped": "답변 캐시가 꺼져 있음 (ANSWER_CACHE, REDIS_URL)"}
+    answerer = build_answerer(ctx.backends, repo)
+    return warm(answerer, repo, s.examples, echo=echo)
+
+
+def purge_guests(ctx: Context, repo):
+    """기한(GUEST_HOURS)이 지난 체험 계정을 탈퇴와 같은 경로로 지운다: 대화·관심 종목 등 기록과
+    계정을 지우고, LLM 추적(Langfuse)의 그 사용자 기록 삭제도 요청한다.
+
+    ALLOW_GUEST 를 끈 뒤에도 남은 체험 계정은 지운다."""
+    from dartrag.accounts import purge_expired_guests
+    from dartrag.obs.tracing import get_tracer
+
+    return {"guests": purge_expired_guests(repo, get_tracer(ctx.settings))}
+
+
 def send_alerts(ctx: Context, repo):
     from dartrag.factory import build_notifiers, build_senders
     from dartrag.feed.alerts import send_user_alerts, unsubscribe_link

@@ -10,7 +10,7 @@ import { IMPORTANCE, type WatchItem } from "@/lib/types";
 import { AlertSettings } from "./AlertSettings";
 
 export default function WatchlistPage() {
-  const { companies } = useApp();
+  const { auth, companies } = useApp();
   const [items, setItems] = useState<WatchItem[] | null>(null);
   const [text, setText] = useState("");
   const [level, setLevel] = useState(2);
@@ -22,7 +22,10 @@ export default function WatchlistPage() {
 
   return (
     <div className="space-y-4">
-      <PageTitle title="관심 종목" sub="관심 종목에 주요 공시가 올라오면 알림을 보냅니다." />
+      <PageTitle
+        title="관심 종목"
+        sub={auth?.user?.guest ? "관심 종목의 공시를 공시 피드에서 모아 봅니다." : "관심 종목에 주요 공시가 올라오면 알림을 보냅니다."}
+      />
       <form
         className="card flex flex-wrap items-end gap-2"
         onSubmit={async (e) => {
