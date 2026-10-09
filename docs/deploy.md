@@ -239,7 +239,7 @@ docker image prune -f
 
 ### 의존성 버전 (잠금 파일)
 
-백엔드 이미지와 CI는 `pyproject.toml` 이 아니라 `requirements/` 의 잠금 파일로 설치합니다 (버전과 해시 고정, Linux x86_64·Python 3.12 기준).
+백엔드 이미지와 CI는 `pyproject.toml` 이 아니라 `requirements/` 의 잠금 파일로 설치합니다 (버전과 해시 고정, Linux x86_64·Python 3.12 기준). 같은 잠금 파일에 arm64 휠 해시도 들어 있어 arm64 서버(Oracle Ampere 등)에서도 그대로 설치되며, CI 의 `docker-arm64` 작업이 이를 확인합니다.
 
 - `requirements/runtime.txt`: 배포 이미지용 (`ops`, `embed`). PyTorch·CUDA 패키지는 뺍니다.
 - `requirements/torch.txt`: PyTorch 버전. 이미지는 CPU 전용 색인에서 이 버전을 받습니다 (해시는 고정하지 않음).

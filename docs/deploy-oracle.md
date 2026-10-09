@@ -199,7 +199,7 @@ nano .env
 - `DART_API_KEY`: OpenDART 인증키 (새 공시를 서버가 직접 받을 때 씀)
 - `OLLAMA_URL=http://ollama:11434`
 - `LLM_MODEL=qwen3:4b`
-- `ALLOW_GUEST=true`: 방문자가 가입 없이 둘러볼 수 있게 합니다 (가입 없이 체험하기 기능이 들어간 뒤)
+- `ALLOW_GUEST=true`: 방문자가 가입 없이 바로 질문해 볼 수 있게 합니다. 체험 계정은 24시간 뒤 기록과 함께 지워지고, 알림과 계정 보안 설정은 쓸 수 없습니다. 접속 주소마다 하루 질문 20개까지입니다. `AUTH_REQUIRED=true`는 그대로 둡니다.
 
 `RERANK_MODEL`은 그대로 둡니다. 저장은 `Ctrl+O`, `Enter`, 나가기는 `Ctrl+X`입니다.
 
@@ -259,7 +259,7 @@ scp -i ~/.ssh/oracle_dartrag -r 폴더경로 ubuntu@서버IP:/opt/dartrag/infra/
 docker compose exec api dartrag index --keyword-only
 ```
 
-예시 질문의 답을 미리 만들어 둡니다. 데이터가 바뀌면 작업자가 다시 만듭니다.
+예시 질문의 답을 미리 만들어 둡니다. 방문자가 예시를 누르면 기다리지 않고 바로 답이 나옵니다. 데이터가 바뀌면 작업자가 30분마다 확인해 다시 만듭니다.
 
 ```bash
 docker compose exec api dartrag cache warm
