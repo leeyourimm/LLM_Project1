@@ -4,6 +4,7 @@ import re
 from dataclasses import dataclass, field
 
 from dartrag.answer.llm import LLM
+from dartrag.answer.numbers import split_sentences, unverified_numbers
 from dartrag.answer.prompt import NOT_FOUND, build_messages
 from dartrag.search import HybridRetriever, SearchFilter, SearchHit
 
@@ -23,7 +24,9 @@ class Answer:
     citations: list[Citation] = field(default_factory=list)
     hits: list[SearchHit] = field(default_factory=list)
     found: bool = True
-    # 답에 근거 번호가 하나도 없거나, 없는 번호를 인용한 경우
+    # 인용한 원문에서 확인되지 않은 숫자 (오기이거나 계산값)
+    unverified: list[str] = field(default_factory=list)
+    # 근거 번호가 없거나 없는 번호를 인용한 경우, 확인되지 않은 숫자가 있는 경우
     warnings: list[str] = field(default_factory=list)
 
 
@@ -53,4 +56,18 @@ def check_citations(answer: Answer) -> Answer:
         answer.warnings.append(f"존재하지 않는 출처 번호를 인용함: {invalid}")
     if not valid:
         answer.warnings.append("근거 출처 표시가 없는 답변")
+    check_numbers(answer)
     return answer
+
+
+def check_numbers(answer: Answer) -> None:
+    """문장마다 숫자를 그 문장이 인용한 출처와 대조한다. 인용이 없는 문장은 전체 출처와 대조."""
+    for sentence in split_sentences(answer.text):
+        numbers = {int(n) for n in _CITE_RE.findall(sentence)}
+        hits = [answer.hits[n - 1] for n in sorted(numbers) if 1 <= n <= len(answer.hits)]
+        sources = [(h.chunk["body"], h.chunk.get("unit")) for h in hits or answer.hits]
+        answer.unverified += unverified_numbers(sentence, sources)
+    if answer.unverified:
+        answer.warnings.append(
+            "인용한 원문에서 확인되지 않은 숫자(오기이거나 계산값): " + ", ".join(answer.unverified)
+        )

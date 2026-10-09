@@ -114,3 +114,18 @@ def test_ollama_errors_are_readable():
     respx.post(f"{URL}/api/chat").mock(side_effect=httpx.ConnectError("refused"))
     with pytest.raises(LLMError, match="Ollama 앱"):
         OllamaLLM("qwen3:8b", URL).chat([Message("user", "q")])
+
+
+def test_answer_flags_numbers_missing_from_cited_source():
+    hits = [
+        hit("c1", "| DS | 111,066,000 |", unit="백만원"),
+        hit("c2", "배당금 총액은 9조 8,094억원이다."),
+    ]
+    llm = FakeLLM("DS 매출은 111조원입니다 [1]. 배당 총액은 9조 8,094억원입니다 [1].")
+    result = Answerer(FakeRetriever(hits), llm).answer("q")
+    # 두 번째 문장의 숫자는 [2]에는 있지만 인용한 [1]에는 없다
+    assert result.unverified == ["9조 8,094억원"]
+    assert any("확인되지 않은 숫자" in w for w in result.warnings)
+
+    ok = Answerer(FakeRetriever(hits), FakeLLM("배당 총액은 9.8조원입니다 [2].")).answer("q")
+    assert ok.unverified == [] and ok.warnings == []
