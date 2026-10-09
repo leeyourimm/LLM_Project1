@@ -5,8 +5,8 @@ import type { NextConfig } from "next";
 const API_ORIGIN = process.env.API_ORIGIN ?? "http://127.0.0.1:8000";
 
 // 화면 응답에 붙이는 보안 헤더. API(/api) 응답은 FastAPI 가 따로 붙인다.
-// 스크립트 제한(CSP script-src)은 테마 초기화용 인라인 스크립트가 있어 넣지 않고,
-// 다른 사이트가 화면을 iframe 으로 감싸는 것(클릭재킹)과 base·form 주소 바꿔치기를 막는다.
+// 스크립트 제한(CSP script-src)은 배포 시 Caddy 가 요청마다 nonce 를 만들어 붙인다 (infra/prod/Caddyfile).
+// 여기서는 다른 사이트가 화면을 iframe 으로 감싸는 것(클릭재킹)과 base·form 주소 바꿔치기를 막는다.
 const SECURITY_HEADERS = [
   { key: "X-Content-Type-Options", value: "nosniff" },
   { key: "X-Frame-Options", value: "DENY" },

@@ -52,3 +52,32 @@ jobs:
       - run: npm run build
         env:
           NEXT_TELEMETRY_DISABLED: "1"
+
+  # 배포 이미지가 빌드되는지, 배포용 compose·Caddyfile 이 올바른지 확인 (이미지는 올리지 않음)
+  docker:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - name: 배포 compose 검사
+        run: |
+          cp infra/prod/.env.example infra/prod/.env
+          docker compose -f infra/prod/docker-compose.yml --profile monitoring --profile ollama config --quiet
+      - name: Caddyfile 검사
+        run: docker compose -f infra/prod/docker-compose.yml run --rm --no-deps caddy caddy validate --config /etc/caddy/Caddyfile
+      - name: 백엔드 이미지
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: false
+          tags: dartrag-backend:ci
+          cache-from: type=gha,scope=backend
+          cache-to: type=gha,scope=backend,mode=max
+      - name: 웹 화면 이미지
+        uses: docker/build-push-action@v6
+        with:
+          context: frontend
+          push: false
+          tags: dartrag-frontend:ci
+          cache-from: type=gha,scope=frontend
+          cache-to: type=gha,scope=frontend,mode=max

@@ -49,7 +49,7 @@
 | A4 | 낮음 | `src/dartrag/web/app.py:186` | 가입할 때 이메일 소유를 확인하지 않는다. | 공개 서버는 `ALLOW_SIGNUP=false`(운영자가 계정 생성)를 권장한다. 메일 알림은 인증 링크를 연 뒤에만 보내므로 남의 주소로 메일을 보낼 수는 없다. |
 | A5 | 낮음 | `src/dartrag/web/app.py:291` | `METRICS_TOKEN` 이 없으면 `/metrics` 가 열려 있다. | 공개 서버에서는 프록시가 막는 것을 전제로 하고, 이제 `doctor` 와 시작 로그가 경고한다. 지표에는 개인정보가 없다. |
 | A6 | 낮음 | `src/dartrag/web/app.py:78` | `/api/docs`, `/api/openapi.json` 이 공개돼 있다. | API 목록만 드러나고 호출에는 로그인이 필요하다. |
-| A7 | 낮음 | `frontend/src/app/layout.tsx:27` | Next 화면은 테마 초기화 인라인 스크립트 때문에 `script-src` CSP 를 걸지 않았다. | 인라인 스크립트는 상수뿐이고, 답변·출처는 React 가 이스케이프해 그린다 (`dangerouslySetInnerHTML` 은 이 상수에만 씀). 다음 단계로 nonce 기반 CSP 를 권장한다. 기존 정적 화면은 엄격한 CSP 를 쓴다. |
+| A7 | 낮음 | `frontend/src/app/layout.tsx`, `infra/prod/Caddyfile` | Next 화면은 테마 초기화 인라인 스크립트 때문에 `script-src` CSP 를 걸지 않았다. | 배포 구성에서 해결: Caddy 가 요청마다 nonce 를 만들어 `script-src 'self' 'nonce-…'` CSP 를 붙이고, Next 와 layout.tsx 가 같은 nonce 를 스크립트에 단다 (화면은 요청마다 그려진다). 개발 서버(`next dev`)에는 걸리지 않는다. |
 | A8 | 낮음 | `src/dartrag/web/alerts.py:140` | 이메일 인증 링크는 GET 으로 바로 인증된다. 보안 검사기가 미리 열어도 인증된다. | 인증 메일은 로그인한 계정의 이메일로만 보내므로, 그 메일함에 도착했다는 것 자체가 소유 확인이다. |
 | A9 | 정보 | `src/dartrag/feed/alerts.py:72` | 구독 취소 HMAC 토큰에 만료가 없다. | 메일 앱 원클릭 구독 취소(RFC 8058) 관행이다. 토큰으로 할 수 있는 일은 그 채널 알림 끄기뿐이다. 비교는 `hmac.compare_digest`, 비밀값이 없으면 항상 거절한다. |
 | A10 | 낮음 | `src/dartrag/dart/client.py:201` | 고유번호 목록 XML 을 lxml 기본 파서로 읽는다. | lxml 5 기본값은 외부 엔티티·네트워크 접근을 막고, 내용은 HTTPS 로 받은 OpenDART 응답이다. 공시 원문 파서는 `resolve_entities=False` 를 쓴다. |
@@ -68,7 +68,7 @@
 - 텔레그램 웹훅: 비밀값이 없으면 항상 403, `X-Telegram-Bot-Api-Secret-Token` 을 상수 시간 비교한다. 연결은 1:1 대화방에서 한 번 쓰는 코드(해시 저장, 30분 만료)로만 된다.
 - 이메일 인증 토큰: `secrets.token_urlsafe(24)`, 해시만 저장, 24시간 만료, 한 번 쓰면 지운다.
 - 메일 헤더 주입: 이메일 형식 검사가 공백·줄바꿈을 허용하지 않고, `EmailMessage` 도 줄바꿈이 든 헤더를 거부한다.
-- XSS: 기존 정적 화면은 엄격한 CSP(`script-src 'self'`), 알림 안내 페이지는 `html.escape`, Next 화면은 React 이스케이프.
+- XSS: 기존 정적 화면은 엄격한 CSP(`script-src 'self'`), 알림 안내 페이지는 `html.escape`, Next 화면은 React 이스케이프와 배포 시 nonce CSP(Caddy).
 - 사용자별 데이터 접근: 대화·평가·관심 종목·알림 채널은 모두 `user_id` 조건으로만 읽고 쓴다 (다른 사용자 대화 조회·이어 묻기·평가가 404).
 
 ## 4. 남은 위험
