@@ -1,0 +1,52 @@
+# 배포용 리버스 프록시. DOMAIN 에 https 인증서를 자동으로 받아 붙인다 (Let's Encrypt).
+# DOMAIN=localhost 로 두면 Caddy 자체 인증서로 https 를 연다 (내 컴퓨터에서 시험할 때).
+#
+# /api/*     → FastAPI (api:8000). 백엔드가 자기 CSP·보안 헤더를 직접 붙인다
+# /grafana/* → Grafana (monitoring 프로필). 비밀번호(basic auth)로 막는다
+# /metrics   → 바깥에서는 404. Prometheus 는 Docker 내부망에서 api:8000 을 바로 읽는다
+# 나머지     → Next.js 웹 화면 (frontend:3000)
+
+{$DOMAIN} {
+	# 모든 응답 공통 보안 헤더. "?" 가 붙은 것은 백엔드가 이미 정했으면 그 값을 둔다
+	header {
+		Strict-Transport-Security "max-age=31536000"
+		?X-Content-Type-Options "nosniff"
+		?X-Frame-Options "DENY"
+		?Referrer-Policy "strict-origin-when-cross-origin"
+		Permissions-Policy "camera=(), microphone=(), geolocation=(), payment=(), usb=(), browsing-topics=()"
+		-Server
+	}
+
+	handle /metrics* {
+		respond 404
+	}
+
+	handle /api/* {
+		# 답변 스트리밍(SSE)이 끊기지 않게 압축하지 않고 바로바로 넘긴다
+		reverse_proxy api:8000 {
+			flush_interval -1
+		}
+	}
+
+	# 비밀번호 해시는 .env 의 GRAFANA_BASIC_AUTH_HASH (비워 두면 아무도 들어갈 수 없다)
+	redir /grafana /grafana/
+	handle /grafana/* {
+		basic_auth {
+			{$GRAFANA_BASIC_AUTH_USER:admin} {$GRAFANA_BASIC_AUTH_HASH}
+		}
+		# Grafana 가 이 basic auth 를 자기 로그인으로 착각하지 않게 지운다
+		reverse_proxy grafana:3000 {
+			header_up -Authorization
+		}
+	}
+
+	handle {
+		encode zstd gzip
+		# 요청마다 새 nonce 를 만들어 CSP 에 넣는다. Next.js 는 요청의 CSP 헤더에서 nonce 를 읽어
+		# 자기 인라인 스크립트(__next_f)에 붙이고, layout.tsx 는 x-nonce 로 테마 스크립트에 붙인다
+		request_header Content-Security-Policy "script-src 'self' 'nonce-{http.request.uuid}'"
+		request_header X-Nonce "{http.request.uuid}"
+		header Content-Security-Policy "default-src 'self'; script-src 'self' 'nonce-{http.request.uuid}'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; connect-src 'self'; object-src 'none'; base-uri 'self'; form-action 'self'; frame-ancestors 'none'"
+		reverse_proxy frontend:3000
+	}
+}

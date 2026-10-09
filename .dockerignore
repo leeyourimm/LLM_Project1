@@ -1,0 +1,25 @@
+# 이미지에 넣지 않을 것 (비밀값, 로컬 데이터, 캐시)
+.git
+.github
+.env
+.env.*
+!.env.example
+**/.env
+**/.env.*
+data/
+reports/
+**/__pycache__
+**/*.pyc
+.venv/
+.pytest_cache/
+.ruff_cache/
+dist/
+docs/
+tests/
+infra/
+frontend/
+**/node_modules
+**/.next
+eval/generated.jsonl
+eval/feedback_candidates.jsonl
+eval/results/

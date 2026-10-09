@@ -1,0 +1,260 @@
+# 서버 한 대에 배포하는 구성. 사용법은 docs/deploy.md
+#
+#   docker compose -f infra/prod/docker-compose.yml up -d --build
+#
+# 바깥에 여는 포트는 Caddy 의 80·443 뿐이다. 나머지는 Docker 내부망에서만 서로 부른다.
+# 설정은 이 폴더의 .env (infra/prod/.env.example 을 복사해 채움) 에서 읽는다.
+# 프로필:
+#   --profile monitoring : Prometheus + Grafana (https://도메인/grafana/)
+#   --profile ollama     : Ollama 를 컨테이너로 띄울 때 (.env 의 OLLAMA_URL=http://ollama:11434)
+name: dartrag-prod
+
+x-backend: &backend
+  image: dartrag-backend:latest
+  build:
+    context: ../..
+    dockerfile: Dockerfile
+  restart: unless-stopped
+  env_file:
+    - path: .env
+      required: true
+  # 아래 값은 컨테이너끼리 부르는 주소라서 .env 보다 우선한다
+  environment:
+    ENVIRONMENT: production
+    DATABASE_URL: postgresql://dartrag:${POSTGRES_PASSWORD:?.env 에 POSTGRES_PASSWORD 를 넣으세요}@postgres:5432/dartrag
+    REDIS_URL: redis://redis:6379/0
+    QDRANT_URL: http://qdrant:6333
+    OPENSEARCH_URL: http://opensearch:9200
+    # 기본: 서버(호스트)에 설치한 Ollama. ollama 프로필을 쓰면 http://ollama:11434
+    OLLAMA_URL: ${OLLAMA_URL:-http://host.docker.internal:11434}
+    RAW_STORE_DIR: /app/data/raw
+  extra_hosts:
+    - host.docker.internal:host-gateway
+  volumes:
+    - rawdata:/app/data
+    - models:/app/models
+    - reports:/app/reports
+  logging: &logging
+    driver: json-file
+    options:
+      max-size: 20m
+      max-file: "5"
+
+services:
+  postgres:
+    image: postgres:16
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: dartrag
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?.env 에 POSTGRES_PASSWORD 를 넣으세요}
+      POSTGRES_DB: dartrag
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      # 처음 만들 때만 실행된다. 이후 새 마이그레이션은 api 가 시작하며 적용한다
+      - ../db:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U dartrag -d dartrag"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    logging: *logging
+
+  redis:
+    image: redis:7
+    restart: unless-stopped
+    # 작업 대기열이 재시작 뒤에도 남도록 디스크에 기록한다
+    command: ["redis-server", "--appendonly", "yes"]
+    volumes:
+      - redisdata:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    logging: *logging
+
+  qdrant:
+    image: qdrant/qdrant:v1.19.2
+    restart: unless-stopped
+    volumes:
+      - qdrantdata:/qdrant/storage
+    healthcheck:
+      # 이미지에 curl 이 없어 bash 로 포트만 확인한다
+      test: ["CMD-SHELL", "bash -c ':> /dev/tcp/127.0.0.1/6333' || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    logging: *logging
+
+  opensearch:
+    build: ../opensearch
+    image: dartrag-opensearch:latest
+    restart: unless-stopped
+    environment:
+      discovery.type: single-node
+      # 내부망에서만 열리므로 보안 플러그인은 끈다
+      DISABLE_SECURITY_PLUGIN: "true"
+      DISABLE_INSTALL_DEMO_CONFIG: "true"
+      bootstrap.memory_lock: "true"
+      OPENSEARCH_JAVA_OPTS: ${OPENSEARCH_JAVA_OPTS:--Xms1g -Xmx1g}
+    ulimits:
+      memlock: {soft: -1, hard: -1}
+      nofile: {soft: 65536, hard: 65536}
+    volumes:
+      - osdata:/usr/share/opensearch/data
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:9200/_cluster/health || exit 1"]
+      interval: 15s
+      timeout: 10s
+      retries: 20
+      start_period: 60s
+    logging: *logging
+
+  api:
+    <<: *backend
+    depends_on:
+      postgres: {condition: service_healthy}
+      redis: {condition: service_healthy}
+      qdrant: {condition: service_healthy}
+      opensearch: {condition: service_healthy}
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/api/health', timeout=5)"
+      interval: 15s
+      timeout: 10s
+      retries: 5
+      start_period: 120s
+
+  worker:
+    <<: *backend
+    command: ["celery", "-A", "dartrag.worker.celery_app", "worker",
+              "-Q", "dart,process,default", "-c", "2", "--loglevel", "INFO"]
+    depends_on:
+      postgres: {condition: service_healthy}
+      redis: {condition: service_healthy}
+      qdrant: {condition: service_healthy}
+      opensearch: {condition: service_healthy}
+    healthcheck:
+      test: ["CMD-SHELL", "celery -A dartrag.worker.celery_app inspect ping -d celery@$$HOSTNAME --timeout 10"]
+      interval: 60s
+      timeout: 30s
+      retries: 3
+      start_period: 120s
+
+  beat:
+    <<: *backend
+    # 다음 실행 시각만 기록하므로 컨테이너 안 임시 폴더에 둔다
+    command: ["celery", "-A", "dartrag.worker.celery_app", "beat",
+              "--schedule", "/tmp/celerybeat-schedule", "--loglevel", "INFO"]
+    depends_on:
+      redis: {condition: service_healthy}
+
+  frontend:
+    image: dartrag-frontend:latest
+    build:
+      context: ../../frontend
+      args:
+        API_ORIGIN: http://api:8000
+    restart: unless-stopped
+    healthcheck:
+      test:
+        - CMD
+        - node
+        - -e
+        - "fetch('http://127.0.0.1:3000/').then(r => process.exit(r.ok ? 0 : 1), () => process.exit(1))"
+      interval: 15s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+    logging: *logging
+
+  caddy:
+    image: caddy:2.10.2
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"
+    environment:
+      DOMAIN: ${DOMAIN:?.env 에 DOMAIN 을 넣으세요}
+      GRAFANA_BASIC_AUTH_USER: ${GRAFANA_BASIC_AUTH_USER:-admin}
+      # 비워 두면 아무도 모르는 임의 비밀번호의 해시를 써서 /grafana 를 잠근다
+      GRAFANA_BASIC_AUTH_HASH: ${GRAFANA_BASIC_AUTH_HASH:-$$2a$$14$$vkXEVtTENDde1/0uFmkOQesOtph9N3w4uKx108TkBuZdGgS5xbgf2}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddydata:/data
+      - caddyconfig:/config
+    depends_on:
+      - api
+      - frontend
+    logging: *logging
+
+  # --- 모니터링 (--profile monitoring) ---
+  prometheus:
+    image: prom/prometheus:v3.13.4
+    profiles: [monitoring]
+    restart: unless-stopped
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.retention.time=30d
+    volumes:
+      - ../monitoring/prometheus/prometheus.prod.yml:/etc/prometheus/prometheus.yml:ro
+      - ../monitoring/prometheus/alerts.yml:/etc/prometheus/alerts.yml:ro
+      - promdata:/prometheus
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:9090/-/healthy"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+    logging: *logging
+
+  grafana:
+    image: grafana/grafana-oss:13.0.2
+    profiles: [monitoring]
+    restart: unless-stopped
+    environment:
+      GF_SECURITY_ADMIN_USER: admin
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:?.env 에 GRAFANA_ADMIN_PASSWORD 를 넣으세요}
+      GF_USERS_ALLOW_SIGN_UP: "false"
+      GF_ANALYTICS_REPORTING_ENABLED: "false"
+      GF_SERVER_ROOT_URL: https://${DOMAIN}/grafana/
+      GF_SERVER_SERVE_FROM_SUB_PATH: "true"
+      GF_SECURITY_COOKIE_SECURE: "true"
+      GF_DASHBOARDS_DEFAULT_HOME_DASHBOARD_PATH: /var/lib/grafana/dashboards/dartrag.json
+    depends_on: [prometheus]
+    volumes:
+      - ../monitoring/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ../monitoring/grafana/dashboards:/var/lib/grafana/dashboards:ro
+      - grafanadata:/var/lib/grafana
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:3000/api/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+    logging: *logging
+
+  # --- Ollama 를 컨테이너로 (--profile ollama). CPU 로만 돈다. GPU 가 있으면 서버에 직접 설치를 권장 ---
+  ollama:
+    image: ollama/ollama:0.12.3
+    profiles: [ollama]
+    restart: unless-stopped
+    volumes:
+      - ollama:/root/.ollama
+    logging: *logging
+
+volumes:
+  pgdata:
+  redisdata:
+  qdrantdata:
+  osdata:
+  rawdata:
+  models:
+  reports:
+  caddydata:
+  caddyconfig:
+  promdata:
+  grafanadata:
+  ollama:
