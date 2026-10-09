@@ -108,6 +108,7 @@ def build_answerer(
         finance=FinanceTool(repo),
         cache=cache,
         tracer=get_tracer(s),
+        has_data=repo.has_indexed_filings,
     )
 
 

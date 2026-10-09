@@ -2,7 +2,7 @@
 
 import re
 import time
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Protocol
@@ -112,6 +112,13 @@ class _Run:
         self.trace.end(output=None, metadata={"error": type(error).__name__})
 
 
+# 아직 색인한 공시가 하나도 없을 때. 검색 모델을 불러오지 않고 바로 답한다
+NO_DATA = (
+    "아직 수집·색인한 공시가 없어 답할 수 없습니다. "
+    "공시 수집(dartrag run)이 끝난 뒤 다시 물어봐 주세요."
+)
+
+
 class Answerer:
     def __init__(
         self,
@@ -122,6 +129,7 @@ class Answerer:
         top_k: int = 8,
         cache=None,  # AnswerCache
         tracer: Tracer = NOOP,
+        has_data: Callable[[], bool] | None = None,
     ):
         self.retriever = retriever
         self.llm = llm
@@ -129,12 +137,15 @@ class Answerer:
         self.top_k = top_k
         self.cache = cache
         self.tracer = tracer
+        self.has_data = has_data
 
     def _precheck(self, question: str, flt: SearchFilter) -> Answer | None:
-        """LLM 을 부르기 전에 끝나는 경우: 거절할 질문, 캐시에 있는 답."""
+        """LLM 을 부르기 전에 끝나는 경우: 거절할 질문, 색인한 공시가 없을 때, 캐시에 있는 답."""
         verdict = check_question(question)
         if verdict:
             return Answer(question, verdict.reply, found=False, refused=verdict.kind)
+        if self.has_data is not None and not self.has_data():
+            return Answer(question, NO_DATA, found=False)
         return self.cache.get(question, flt) if self.cache else None
 
     def retrieve(self, question: str, flt: SearchFilter | None = None) -> list[SearchHit]:
