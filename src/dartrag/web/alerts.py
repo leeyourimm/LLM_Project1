@@ -1,4 +1,4 @@
-"""알림 설정 API: 사용자별 이메일·텔레그램 채널 등록, 인증, 구독 취소, 텔레그램 웹훅.
+"""알림 설정 API: 사용자별 이메일·텔레그램·웹 푸시 채널 등록, 인증, 구독 취소, 텔레그램 웹훅.
 
 로그인을 켠 경우(AUTH_REQUIRED=true)에만 사용자별 채널을 쓴다.
 로그인 없이 혼자 쓸 때는 .env 의 ALERT_* 설정으로 알림을 받는다.
@@ -12,16 +12,28 @@ from html import escape
 from typing import Annotated, Literal
 from urllib.parse import urlencode
 
-from fastapi import APIRouter, BackgroundTasks, Body, Header, HTTPException, Path, Query
+from fastapi import (
+    APIRouter,
+    BackgroundTasks,
+    Body,
+    Header,
+    HTTPException,
+    Path,
+    Query,
+    Request,
+)
 from fastapi.responses import HTMLResponse, RedirectResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
-from dartrag.feed.alerts import check_unsubscribe
+from dartrag.feed import webpush
+from dartrag.feed.alerts import check_unsubscribe, send_push
+from dartrag.feed.channels import SendError
 from dartrag.feed.telegram_bot import handle_update, new_link_code, token_hash
+from dartrag.web.auth import device_label
 
 log = logging.getLogger(__name__)
 
-Kind = Literal["email", "telegram"]
+Kind = Literal["email", "telegram", "push"]
 VERIFY_HOURS = 24
 TELEGRAM_LINK_MINUTES = 30
 RESEND_SECONDS = 60
@@ -29,6 +41,29 @@ RESEND_SECONDS = 60
 
 class EnabledRequest(BaseModel):
     enabled: bool
+
+
+class PushKeys(BaseModel):
+    p256dh: str = Field(max_length=200)
+    auth: str = Field(max_length=100)
+
+
+class PushSubscription(BaseModel):
+    """브라우저 PushSubscription.toJSON() 모양. expirationTime 같은 다른 값은 쓰지 않는다."""
+
+    endpoint: str = Field(max_length=webpush.MAX_ENDPOINT)
+    keys: PushKeys
+
+
+class PushEndpoint(BaseModel):
+    endpoint: str = Field(max_length=webpush.MAX_ENDPOINT)
+
+
+PUSH_TEST = {
+    "title": "DART 공시 알림 시험",
+    "body": "이 브라우저로 공시 알림이 옵니다.",
+    "url": "/watchlist",
+}
 
 
 def _page(title: str, message: str, form: str = "") -> HTMLResponse:
@@ -79,12 +114,21 @@ def build_routers(services, CurrentUser) -> tuple[APIRouter, APIRouter]:  # noqa
             raise HTTPException(429, "잠시 후 다시 시도해 주세요")
         last_sent[(user_id, kind)] = now
 
+    def push_sender():
+        sender = services.senders().get("push")
+        if sender is None:
+            raise HTTPException(
+                503, "웹 푸시가 설정되지 않았습니다 (VAPID_PUBLIC_KEY, VAPID_PRIVATE_KEY)"
+            )
+        return sender
+
     @api.get("/api/alerts")
     def channels(user: CurrentUser = None):
         senders = services.senders()
         available = {
             "email": "email" in senders and bool(services.secret_key),
             "telegram": "telegram" in senders and bool(services.telegram_bot_username),
+            "push": "push" in senders,
         }
         if user is None:
             return {"per_user": False, "available": available, "channels": []}
@@ -96,11 +140,15 @@ def build_routers(services, CurrentUser) -> tuple[APIRouter, APIRouter]:  # noqa
                 and available["email"]
                 and not repo.email_verified(user.id)
             )
+            devices = repo.push_devices(user.id) if available["push"] else []
         return {
             "per_user": True,
             "available": available,
             "channels": rows,
             "email_needs_verification": needs,
+            # 브라우저가 구독할 때 쓰는 서버 공개키(applicationServerKey). 비밀키는 서버에만 있다
+            "push_public_key": senders["push"].public_key if available["push"] else None,
+            "push_devices": devices,
         }
 
     @api.post("/api/alerts/email", status_code=202)
@@ -143,6 +191,67 @@ def build_routers(services, CurrentUser) -> tuple[APIRouter, APIRouter]:  # noqa
             repo.start_alert_channel(user.id, "telegram", None, hashed, until)
         bot = services.telegram_bot_username.lstrip("@")
         return {"link": f"https://t.me/{bot}?start={code}", "expires_at": until}
+
+    # --- 웹 푸시 -----------------------------------------------------------
+
+    @api.post("/api/alerts/push", status_code=201)
+    def add_push(req: PushSubscription, request: Request, user: CurrentUser = None):
+        """이 브라우저의 구독을 등록하고 웹 푸시 알림을 켠다.
+
+        서버가 이 주소로 요청을 보내므로 알려진 푸시 서비스의 https 주소만 받는다."""
+        user = need_user(user)
+        sender = push_sender()
+        try:
+            webpush.check_endpoint(req.endpoint)
+            webpush.check_subscription_keys(req.keys.p256dh, req.keys.auth)
+        except webpush.PushKeyError as e:
+            raise HTTPException(422, str(e)) from None
+        browser, system = device_label(request.headers.get("user-agent"))
+        with services.repo() as repo:
+            sub_id = repo.add_push_subscription(
+                user.id,
+                req.endpoint,
+                req.keys.p256dh.strip(),
+                req.keys.auth.strip(),
+                sender.public_key,
+                f"{browser} · {system}",
+            )
+        return {"ok": True, "id": sub_id}
+
+    @api.delete("/api/alerts/push/device")
+    def remove_this_browser(req: PushEndpoint, user: CurrentUser = None):
+        """이 브라우저 구독 해제 (화면이 브라우저 쪽 구독도 함께 지운다)."""
+        user = need_user(user)
+        with services.repo() as repo:
+            removed = repo.remove_push_subscription(user.id, endpoint=req.endpoint)
+        return {"ok": True, "removed": removed}
+
+    @api.delete("/api/alerts/push/devices/{device_id}")
+    def remove_device(device_id: int, user: CurrentUser = None):
+        """목록에서 다른 브라우저 구독 해제."""
+        user = need_user(user)
+        with services.repo() as repo:
+            if not repo.remove_push_subscription(user.id, sub_id=device_id):
+                raise HTTPException(404, "등록된 브라우저가 아닙니다")
+        return {"ok": True}
+
+    @api.post("/api/alerts/push/test")
+    def test_push(user: CurrentUser = None):
+        """구독한 모든 브라우저로 시험 알림. 끝난 구독(404·410)은 이때도 지운다."""
+        user = need_user(user)
+        sender = push_sender()
+        throttle(user.id, "push-test")
+        with services.repo() as repo:
+            if not repo.push_subscriptions(user.id):
+                raise HTTPException(404, "알림을 받을 브라우저가 없습니다")
+            try:
+                sent = send_push(repo, sender, user.id, PUSH_TEST)
+            except SendError as e:
+                log.warning("사용자 %s 웹 푸시 시험 실패: %s", user.id, e)
+                raise HTTPException(
+                    502, "시험 알림을 보내지 못했습니다. 잠시 후 다시 해 보세요"
+                ) from None
+        return {"ok": True, "sent": sent}
 
     @api.patch("/api/alerts/{kind}")
     def set_enabled(kind: Annotated[Kind, Path()], req: EnabledRequest, user: CurrentUser = None):

@@ -4,6 +4,8 @@ export class ApiError extends Error {
   constructor(
     public status: number,
     message: string,
+    // 응답 본문 (detail 밖의 값이 필요할 때: 2단계 로그인의 restart 등)
+    public body: unknown = null,
   ) {
     super(message);
   }
@@ -35,7 +37,7 @@ export async function api<T>(path: string, init: RequestInit = {}): Promise<T> {
     if (res.status === 401 && typeof window !== "undefined") {
       window.dispatchEvent(new CustomEvent("dartrag:unauthorized"));
     }
-    throw new ApiError(res.status, detailOf(body, res.status));
+    throw new ApiError(res.status, detailOf(body, res.status), body);
   }
   return body as T;
 }

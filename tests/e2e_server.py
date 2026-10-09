@@ -6,8 +6,9 @@
     E2E_DATABASE_URL=postgresql://… python -m tests.e2e_server
 
 탈퇴할 때 추적 삭제를 요청했는지 화면 테스트에서 확인할 수 있게 /api/_e2e/forgotten 을,
-계정 메일(인증, 비밀번호 재설정)의 링크를 열어 볼 수 있게 /api/_e2e/mail 을 연다.
-메일은 실제로 보내지 않고 메모리에만 담는다.
+계정 메일(인증, 비밀번호 재설정)의 링크를 열어 볼 수 있게 /api/_e2e/mail 을,
+웹 푸시 시험 알림이 나갔는지 볼 수 있게 /api/_e2e/push 를 연다.
+메일과 웹 푸시는 실제로 보내지 않고 메모리에만 담는다.
 이 파일은 테스트 전용이며 배포 코드에서 쓰지 않는다.
 """
 
@@ -19,6 +20,7 @@ import uvicorn
 
 from dartrag.answer import Answerer
 from dartrag.db import Repository
+from dartrag.feed import webpush
 from dartrag.search import SearchHit
 from dartrag.web.app import create_app
 from dartrag.web.services import Services
@@ -70,6 +72,20 @@ class CaptureSender:
         self.sent.append({"to": to, "subject": subject, "text": text})
 
 
+class CapturePush:
+    """웹 푸시 대신 보낸 알림을 메모리에 담는다 (푸시 서비스로 보내지 않음).
+
+    공개키는 실제 VAPID 키라 브라우저 쪽 구독 코드가 그대로 돈다."""
+
+    def __init__(self):
+        _, self.public_key = webpush.generate_vapid_keys()
+        self.sent: list[dict] = []
+
+    def send(self, subscription, message) -> None:
+        host = webpush.push_host(subscription["endpoint"])
+        self.sent.append({"push_service": host, **message})
+
+
 def build(url: str, origin: str):
     migrate = Repository.connect(url)
     try:
@@ -87,6 +103,7 @@ def build(url: str, origin: str):
 
     spy = SpyTracer()
     mail = CaptureSender()
+    push = CapturePush()
     services = Services(
         repo,
         lambda r: Answerer(FakeRetriever(), FakeLLM()),
@@ -96,8 +113,10 @@ def build(url: str, origin: str):
         cookie_secure=False,
         allowed_origins=(origin,),
         tracer=lambda: spy,
-        senders=lambda: {"email": mail},
+        senders=lambda: {"email": mail, "push": push},
         public_url=origin,
+        # 2단계 인증 키를 이 값으로 암호화해 둔다 (테스트 전용 값)
+        secret_key="e2e-only-secret-key-not-for-production",
     )
     app = create_app(services)
 
@@ -109,6 +128,10 @@ def build(url: str, origin: str):
     def last_mail(to: str, subject: str = ""):
         found = [m for m in mail.sent if m["to"] == to and subject in m["subject"]]
         return found[-1] if found else {}
+
+    @app.get("/api/_e2e/push", include_in_schema=False)
+    def pushed():
+        return {"count": len(push.sent), "last": push.sent[-1] if push.sent else None}
 
     return app
 

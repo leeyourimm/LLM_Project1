@@ -1,5 +1,7 @@
-"""이메일·텔레그램 발송. 비밀번호, 봇 토큰, 받는 주소는 로그와 오류 메시지에 남기지 않는다."""
+"""이메일·텔레그램·웹 푸시 발송. 비밀번호, 봇 토큰, 받는 주소, 푸시 구독 주소는 로그와 오류
+메시지에 남기지 않는다."""
 
+import json
 import smtplib
 import ssl
 from email.message import EmailMessage
@@ -13,6 +15,10 @@ TELEGRAM_LIMIT = 4096
 
 class SendError(RuntimeError):
     pass
+
+
+class PushGone(SendError):
+    """푸시 서비스가 구독이 끝났다고 알렸다 (404·410). 그 구독은 지운다."""
 
 
 class EmailSender:
@@ -108,3 +114,60 @@ class TelegramSender:
         self._call(
             "setWebhook", {"url": url, "secret_token": secret, "allowed_updates": ["message"]}
         )
+
+
+class WebPushSender:
+    """웹 푸시 (VAPID). 구독마다 내용을 암호화해 브라우저 회사의 푸시 서비스로 보낸다.
+
+    구독 주소(endpoint)는 그 브라우저를 가리키는 개인 식별자라서 오류 메시지에 넣지 않는다.
+    리디렉션은 따라가지 않는다 (httpx 기본값)."""
+
+    def __init__(
+        self,
+        private_key: str,
+        public_key: str,
+        subject: str,
+        client: httpx.Client | None = None,
+        ttl: int = 86400,
+    ):
+        from dartrag.feed import webpush
+
+        self._key = webpush.load_private_key(private_key)
+        if webpush.public_key_of(self._key) != public_key.strip():
+            raise webpush.PushKeyError("VAPID_PUBLIC_KEY 가 VAPID_PRIVATE_KEY 와 짝이 아닙니다")
+        self.public_key = public_key.strip()
+        self.subject = subject
+        self.ttl = ttl  # 브라우저가 꺼져 있을 때 푸시 서비스가 보관할 시간(초)
+        self._client = client or httpx.Client(timeout=15)
+
+    def send(self, subscription: dict, message: dict) -> None:
+        """subscription: endpoint, p256dh, auth. message: title, body, url (짧게, 비밀값 없이)."""
+        from dartrag.feed import webpush
+
+        endpoint = subscription["endpoint"]
+        try:
+            webpush.check_endpoint(endpoint)
+            body = webpush.encrypt(
+                json.dumps(message, ensure_ascii=False).encode(),
+                subscription["p256dh"],
+                subscription["auth"],
+            )
+        except webpush.PushKeyError as e:
+            # 저장된 구독이 지금 규칙에 맞지 않으면 다시 쓸 수 없다
+            raise PushGone(f"웹 푸시 구독을 쓸 수 없음: {e}") from None
+        headers = {
+            "Authorization": webpush.vapid_authorization(endpoint, self._key, self.subject),
+            "TTL": str(self.ttl),
+            "Content-Encoding": "aes128gcm",
+            "Content-Type": "application/octet-stream",
+            "Urgency": "normal",
+        }
+        try:
+            resp = self._client.post(endpoint, content=body, headers=headers)
+        except httpx.HTTPError as e:
+            raise SendError(f"웹 푸시 요청 실패: {type(e).__name__}") from None
+        if resp.status_code in (404, 410):
+            raise PushGone(f"웹 푸시 구독 만료: HTTP {resp.status_code}")
+        if not resp.is_success:
+            # 리디렉션(3xx)도 실패로 본다. 응답 본문과 주소는 남기지 않는다
+            raise SendError(f"웹 푸시 전송 실패: HTTP {resp.status_code}")

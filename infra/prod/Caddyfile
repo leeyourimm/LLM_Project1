@@ -46,7 +46,7 @@
 		# 자기 인라인 스크립트(__next_f)에 붙이고, layout.tsx 는 x-nonce 로 테마 스크립트에 붙인다
 		request_header Content-Security-Policy "script-src 'self' 'nonce-{http.request.uuid}'"
 		request_header X-Nonce "{http.request.uuid}"
-		header Content-Security-Policy "default-src 'self'; script-src 'self' 'nonce-{http.request.uuid}'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; connect-src 'self'; object-src 'none'; base-uri 'self'; form-action 'self'; frame-ancestors 'none'"
+		header Content-Security-Policy "default-src 'self'; script-src 'self' 'nonce-{http.request.uuid}'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; connect-src 'self'; worker-src 'self'; manifest-src 'self'; object-src 'none'; base-uri 'self'; form-action 'self'; frame-ancestors 'none'"
 		reverse_proxy frontend:3000
 	}
 }

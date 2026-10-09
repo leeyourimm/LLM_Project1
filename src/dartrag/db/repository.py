@@ -529,10 +529,14 @@ class Repository:
                SELECT id FROM conversations WHERE user_id = %s)""",
         "DELETE FROM conversations WHERE user_id = %s",
         "DELETE FROM user_notifications WHERE user_id = %s",
+        "DELETE FROM user_push_subscriptions WHERE user_id = %s",
         "DELETE FROM user_alert_channels WHERE user_id = %s",
         "DELETE FROM user_watchlist WHERE user_id = %s",
         "DELETE FROM auth_tokens WHERE user_id = %s",
         "DELETE FROM user_devices WHERE user_id = %s",
+        "DELETE FROM login_challenges WHERE user_id = %s",
+        "DELETE FROM user_recovery_codes WHERE user_id = %s",
+        "DELETE FROM user_totp WHERE user_id = %s",
         "DELETE FROM sessions WHERE user_id = %s",
     )
 
@@ -552,7 +556,8 @@ class Repository:
         return cur.rowcount > 0
 
     def export_user(self, user_id: int) -> dict | None:
-        """내 데이터 내려받기용. 비밀번호 해시, 세션, 인증 코드·기기 해시는 넣지 않는다."""
+        """내 데이터 내려받기용. 비밀번호 해시, 세션, 인증 코드·기기 해시, 2단계 인증 비밀값과
+        복구 코드, 웹 푸시 구독 주소·키는 넣지 않는다."""
 
         def rows(sql: str, params: tuple) -> list[dict]:
             cur = self.conn.execute(sql, params)
@@ -609,8 +614,28 @@ class Repository:
                    WHERE user_id = %s ORDER BY first_seen""",
                 (user_id,),
             ),
+            # 웹 푸시 구독: 주소와 키는 그 브라우저로 보낼 수 있는 값이라
+            # 푸시 서비스 호스트만 넣는다
+            "push_subscriptions": rows(
+                """SELECT label, substring(endpoint from '^https://([^/:]+)') AS push_service,
+                          created_at, last_sent_at
+                   FROM user_push_subscriptions WHERE user_id = %s ORDER BY created_at, id""",
+                (user_id,),
+            ),
+            "two_factor": self._two_factor_export(user_id),
             "conversations": [c | {"messages": by_conv.get(c["id"], [])} for c in conversations],
         }
+
+    def _two_factor_export(self, user_id: int) -> dict:
+        row = self.conn.execute(
+            """SELECT t.enabled_at,
+                      (SELECT count(*) FROM user_recovery_codes r WHERE r.user_id = t.user_id)
+               FROM user_totp t WHERE t.user_id = %s AND t.enabled_at IS NOT NULL""",
+            (user_id,),
+        ).fetchone()
+        if row is None:
+            return {"enabled": False}
+        return {"enabled": True, "enabled_at": row[0], "recovery_codes_left": row[1]}
 
     def create_session(self, token_hash: str, user_id: int, expires_at) -> None:
         self.conn.execute(
@@ -631,6 +656,12 @@ class Repository:
     def delete_session(self, token_hash: str) -> None:
         self.conn.execute("DELETE FROM sessions WHERE token_hash = %s", (token_hash,))
         self.conn.commit()
+
+    def revoke_sessions(self, user_id: int) -> int:
+        """그 사용자의 모든 로그인을 끊는다."""
+        cur = self.conn.execute("DELETE FROM sessions WHERE user_id = %s", (user_id,))
+        self.conn.commit()
+        return cur.rowcount
 
     # --- 계정 메일 (이메일 인증, 비밀번호 재설정, 새 기기 알림) --------------
 
@@ -710,6 +741,140 @@ class Repository:
         if not had_any:
             return "first"
         return "new" if inserted else "known"
+
+    # --- 2단계 인증 (TOTP) ------------------------------------------------
+
+    def totp(self, user_id: int) -> dict | None:
+        """{secret(암호화된 값), enabled, last_step, recovery_left}. 등록한 적 없으면 None."""
+        row = self.conn.execute(
+            """SELECT t.secret, t.enabled_at IS NOT NULL, t.last_step,
+                      (SELECT count(*) FROM user_recovery_codes r WHERE r.user_id = t.user_id)
+               FROM user_totp t WHERE t.user_id = %s""",
+            (user_id,),
+        ).fetchone()
+        if row is None:
+            return None
+        return {"secret": row[0], "enabled": row[1], "last_step": row[2], "recovery_left": row[3]}
+
+    def totp_enabled(self, user_id: int) -> bool:
+        row = self.conn.execute(
+            "SELECT enabled_at IS NOT NULL FROM user_totp WHERE user_id = %s", (user_id,)
+        ).fetchone()
+        return bool(row and row[0])
+
+    def start_totp(self, user_id: int, sealed_secret: str) -> bool:
+        """등록 시작: 새 비밀값을 '확인 전' 상태로 둔다. 이미 켜져 있으면 False (바꾸지 않음)."""
+        row = self.conn.execute(
+            """INSERT INTO user_totp (user_id, secret) VALUES (%s, %s)
+               ON CONFLICT (user_id) DO UPDATE SET secret = EXCLUDED.secret,
+                 last_step = NULL, created_at = now()
+               WHERE user_totp.enabled_at IS NULL
+               RETURNING user_id""",
+            (user_id, sealed_secret),
+        ).fetchone()
+        self.conn.commit()
+        return row is not None
+
+    def enable_totp(self, user_id: int, step: int, recovery_hashes: list[str]) -> bool:
+        """첫 코드를 확인하면 켠다. 복구 코드를 새로 두고, 다른 기기의 로그인을 모두 끊는다.
+
+        한 트랜잭션에서 한다. 이미 켜져 있거나 등록을 시작하지 않았으면 False."""
+        try:
+            cur = self.conn.execute(
+                """UPDATE user_totp SET enabled_at = now(), last_step = %s
+                   WHERE user_id = %s AND enabled_at IS NULL""",
+                (step, user_id),
+            )
+            if cur.rowcount == 0:
+                self.conn.rollback()
+                return False
+            self._put_recovery_codes(user_id, recovery_hashes)
+            self.conn.execute("DELETE FROM sessions WHERE user_id = %s", (user_id,))
+            self.conn.commit()
+        except Exception:
+            self.conn.rollback()
+            raise
+        return True
+
+    def _put_recovery_codes(self, user_id: int, hashes: list[str]) -> None:
+        self.conn.execute("DELETE FROM user_recovery_codes WHERE user_id = %s", (user_id,))
+        with self.conn.cursor() as cur:
+            cur.executemany(
+                "INSERT INTO user_recovery_codes (user_id, code_hash) VALUES (%s, %s)",
+                [(user_id, h) for h in hashes],
+            )
+
+    def replace_recovery_codes(self, user_id: int, hashes: list[str]) -> None:
+        """복구 코드 새로 받기: 남은 예전 코드는 모두 못 쓰게 된다."""
+        self._put_recovery_codes(user_id, hashes)
+        self.conn.commit()
+
+    def use_totp_step(self, user_id: int, step: int) -> bool:
+        """코드의 시간 구간을 쓴 것으로 적는다. 이미 그 구간이나 뒤의 코드를 썼으면 False
+        (같은 코드를 다시 쓰지 못하게, RFC 6238 5.2)."""
+        cur = self.conn.execute(
+            """UPDATE user_totp SET last_step = %s
+               WHERE user_id = %s AND enabled_at IS NOT NULL
+                 AND (last_step IS NULL OR last_step < %s)""",
+            (step, user_id, step),
+        )
+        self.conn.commit()
+        return cur.rowcount > 0
+
+    def use_recovery_code(self, user_id: int, code_hash: str) -> int | None:
+        """복구 코드를 한 번 쓰고 지운다. 남은 수, 맞는 코드가 없으면 None."""
+        cur = self.conn.execute(
+            "DELETE FROM user_recovery_codes WHERE user_id = %s AND code_hash = %s",
+            (user_id, code_hash),
+        )
+        left = self.conn.execute(
+            "SELECT count(*) FROM user_recovery_codes WHERE user_id = %s", (user_id,)
+        ).fetchone()[0]
+        self.conn.commit()
+        return left if cur.rowcount else None
+
+    def disable_totp(self, user_id: int) -> bool:
+        """2단계 인증 끄기: 비밀값, 복구 코드, 진행 중인 로그인 단계를 모두 지운다."""
+        self.conn.execute("DELETE FROM user_recovery_codes WHERE user_id = %s", (user_id,))
+        self.conn.execute("DELETE FROM login_challenges WHERE user_id = %s", (user_id,))
+        cur = self.conn.execute("DELETE FROM user_totp WHERE user_id = %s", (user_id,))
+        self.conn.commit()
+        return cur.rowcount > 0
+
+    def create_login_challenge(self, token_hash: str, user_id: int, expires_at) -> None:
+        """비밀번호는 맞고 인증 코드를 기다리는 로그인. 쿠키 토큰의 해시만 둔다."""
+        self.conn.execute("DELETE FROM login_challenges WHERE expires_at < now()")
+        self.conn.execute(
+            """INSERT INTO login_challenges (token_hash, user_id, expires_at)
+               VALUES (%s, %s, %s)""",
+            (token_hash, user_id, expires_at),
+        )
+        self.conn.commit()
+
+    def login_challenge(self, token_hash: str, max_attempts: int) -> tuple[int, str] | None:
+        """기한 안이고 틀린 횟수가 남은 로그인 단계면 (사용자 id, 이메일)."""
+        return self.conn.execute(
+            """SELECT u.id, u.email FROM login_challenges c JOIN users u ON u.id = c.user_id
+               WHERE c.token_hash = %s AND c.expires_at > now() AND c.attempts < %s""",
+            (token_hash, max_attempts),
+        ).fetchone()
+
+    def fail_login_challenge(self, token_hash: str, max_attempts: int) -> int:
+        """틀린 횟수를 하나 올리고 남은 횟수를 돌려준다. 다 쓰면 그 단계를 지운다."""
+        row = self.conn.execute(
+            """UPDATE login_challenges SET attempts = attempts + 1
+               WHERE token_hash = %s RETURNING attempts""",
+            (token_hash,),
+        ).fetchone()
+        left = max_attempts - row[0] if row else 0
+        if left <= 0:
+            self.conn.execute("DELETE FROM login_challenges WHERE token_hash = %s", (token_hash,))
+        self.conn.commit()
+        return max(left, 0)
+
+    def delete_login_challenge(self, token_hash: str) -> None:
+        self.conn.execute("DELETE FROM login_challenges WHERE token_hash = %s", (token_hash,))
+        self.conn.commit()
 
     def pending_alerts(self, channel: str) -> list[dict]:
         """관심 종목의 기준 이상 공시 중 이 채널로 아직 안 보낸 것.
@@ -966,11 +1131,125 @@ class Repository:
         return cur.rowcount
 
     def remove_alert_channel(self, user_id: int, kind: str) -> bool:
+        if kind == "push":  # 웹 푸시를 지우면 모든 브라우저의 구독도 지운다
+            self.conn.execute("DELETE FROM user_push_subscriptions WHERE user_id = %s", (user_id,))
         cur = self.conn.execute(
             "DELETE FROM user_alert_channels WHERE user_id = %s AND kind = %s", (user_id, kind)
         )
         self.conn.commit()
         return cur.rowcount > 0
+
+    # --- 웹 푸시 구독 (브라우저마다 한 줄) ---------------------------------
+
+    def add_push_subscription(
+        self,
+        user_id: int,
+        endpoint: str,
+        p256dh: str,
+        auth: str,
+        vapid_key: str,
+        label: str,
+        max_per_user: int = 10,
+    ) -> int:
+        """구독을 저장하고 웹 푸시 채널을 켠다. 구독 id.
+
+        같은 브라우저(같은 주소)를 다른 사용자가 구독하면 그 사용자 것으로 옮긴다 (마지막에 구독한
+        사람에게만 간다). 한 사용자의 구독이 max_per_user 개를 넘으면 오래된 것부터 지운다."""
+        try:
+            prev = self.conn.execute(
+                "SELECT user_id FROM user_push_subscriptions WHERE endpoint = %s", (endpoint,)
+            ).fetchone()
+            sub_id = self.conn.execute(
+                """INSERT INTO user_push_subscriptions
+                     (user_id, endpoint, p256dh, auth, vapid_key, label)
+                   VALUES (%s, %s, %s, %s, %s, %s)
+                   ON CONFLICT (endpoint) DO UPDATE SET
+                     user_id = EXCLUDED.user_id, p256dh = EXCLUDED.p256dh, auth = EXCLUDED.auth,
+                     vapid_key = EXCLUDED.vapid_key, label = EXCLUDED.label,
+                     created_at = now(), last_sent_at = NULL
+                   RETURNING id""",
+                (user_id, endpoint, p256dh, auth, vapid_key, label),
+            ).fetchone()[0]
+            self.conn.execute(
+                """DELETE FROM user_push_subscriptions WHERE user_id = %s AND id NOT IN (
+                     SELECT id FROM user_push_subscriptions WHERE user_id = %s
+                     ORDER BY created_at DESC, id DESC LIMIT %s)""",
+                (user_id, user_id, max_per_user),
+            )
+            # 구독은 로그인한 사용자의 브라우저가 직접 만든 것이라 따로 인증하지 않는다
+            self.conn.execute(
+                """INSERT INTO user_alert_channels (user_id, kind, target, verified_at, enabled)
+                   VALUES (%s, 'push', NULL, now(), true)
+                   ON CONFLICT (user_id, kind) DO UPDATE SET enabled = true,
+                     verified_at = COALESCE(user_alert_channels.verified_at, now())""",
+                (user_id,),
+            )
+            if prev and prev[0] != user_id:
+                self._drop_empty_push_channel(prev[0])
+            self.conn.commit()
+        except Exception:
+            self.conn.rollback()
+            raise
+        return sub_id
+
+    def _drop_empty_push_channel(self, user_id: int) -> None:
+        """구독이 하나도 남지 않으면 웹 푸시 채널도 지운다 (커밋은 부르는 쪽이 한다)."""
+        self.conn.execute(
+            """DELETE FROM user_alert_channels c WHERE c.user_id = %s AND c.kind = 'push'
+                 AND NOT EXISTS (SELECT 1 FROM user_push_subscriptions s
+                                 WHERE s.user_id = c.user_id)""",
+            (user_id,),
+        )
+
+    def push_subscriptions(self, user_id: int) -> list[dict]:
+        """보낼 때 쓰는 구독 정보 (주소와 키)."""
+        cur = self.conn.execute(
+            """SELECT id, endpoint, p256dh, auth, vapid_key FROM user_push_subscriptions
+               WHERE user_id = %s ORDER BY id""",
+            (user_id,),
+        )
+        cols = [c.name for c in cur.description]
+        return [dict(zip(cols, r, strict=True)) for r in cur.fetchall()]
+
+    def push_devices(self, user_id: int) -> list[dict]:
+        """화면용 목록. 주소 대신 주소의 해시(key)를 줘서 화면이 '이 브라우저'를 알아보게 한다."""
+        cur = self.conn.execute(
+            """SELECT id, label, encode(sha256(convert_to(endpoint, 'UTF8')), 'hex') AS key,
+                      created_at, last_sent_at
+               FROM user_push_subscriptions WHERE user_id = %s ORDER BY created_at, id""",
+            (user_id,),
+        )
+        cols = [c.name for c in cur.description]
+        return [dict(zip(cols, r, strict=True)) for r in cur.fetchall()]
+
+    def remove_push_subscription(
+        self, user_id: int, *, endpoint: str | None = None, sub_id: int | None = None
+    ) -> bool:
+        """그 사용자의 구독 하나를 지운다 (주소나 id 로). 마지막 구독이면 채널도 지운다."""
+        cur = self.conn.execute(
+            """DELETE FROM user_push_subscriptions
+               WHERE user_id = %s AND (endpoint = %s OR id = %s)""",
+            (user_id, endpoint, sub_id),
+        )
+        self._drop_empty_push_channel(user_id)
+        self.conn.commit()
+        return cur.rowcount > 0
+
+    def record_push_results(self, user_id: int, sent: list[int], gone: list[int]) -> None:
+        """보낸 구독은 마지막 전송 시각을 적고, 끝난 구독은 지운다."""
+        if sent:
+            self.conn.execute(
+                """UPDATE user_push_subscriptions SET last_sent_at = now()
+                   WHERE user_id = %s AND id = ANY(%s)""",
+                (user_id, sent),
+            )
+        if gone:
+            self.conn.execute(
+                "DELETE FROM user_push_subscriptions WHERE user_id = %s AND id = ANY(%s)",
+                (user_id, gone),
+            )
+            self._drop_empty_push_channel(user_id)
+        self.conn.commit()
 
     def user_pending_alerts(self, max_age_days: int = 3) -> list[dict]:
         """인증된 채널이 있는 사용자의 관심 종목 공시 중 아직 안 보낸 것.
@@ -983,7 +1262,11 @@ class Repository:
             FROM user_alert_channels ch
             JOIN user_watchlist w ON w.user_id = ch.user_id
             JOIN disclosures d ON d.corp_code = w.corp_code AND d.importance >= w.min_importance
-            WHERE ch.enabled AND ch.verified_at IS NOT NULL AND ch.target IS NOT NULL
+            WHERE ch.enabled AND ch.verified_at IS NOT NULL
+              -- 웹 푸시는 받는 곳이 구독 표(브라우저마다 한 줄)에 있다
+              AND (ch.target IS NOT NULL OR ch.kind = 'push')
+              AND (ch.kind <> 'push' OR EXISTS (
+                     SELECT 1 FROM user_push_subscriptions s WHERE s.user_id = ch.user_id))
               AND d.seen_at >= w.added_at AND d.seen_at >= ch.verified_at - interval '1 day'
               AND d.seen_at >= now() - make_interval(days => %s)
               -- 정기보고서는 처리(변경점 요약)가 끝나면 보낸다. 2시간이 지나면 그냥 보낸다
@@ -1245,6 +1528,7 @@ class Repository:
 
     def purge_expired_sessions(self) -> int:
         cur = self.conn.execute("DELETE FROM sessions WHERE expires_at < now()")
+        self.conn.execute("DELETE FROM login_challenges WHERE expires_at < now()")
         self.conn.commit()
         return cur.rowcount
 

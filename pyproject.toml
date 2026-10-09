@@ -18,6 +18,10 @@ dependencies = [
   "reportlab>=4.2",
   "celery[redis]>=5.4",
   "prometheus-client>=0.20",
+  # 웹 푸시 내용 암호화(RFC 8291)와 VAPID 서명(RFC 8292), 2단계 인증 비밀값 암호화
+  "cryptography>=44",
+  # 2단계 인증 등록용 QR 코드 (순수 파이썬, 의존성 없음)
+  "segno>=1.6",
 ]
 
 [project.optional-dependencies]

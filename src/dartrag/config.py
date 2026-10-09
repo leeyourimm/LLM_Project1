@@ -53,6 +53,12 @@ class Settings(BaseSettings):
     smtp_from: str = ""
     smtp_starttls: bool = True
 
+    # 웹 푸시 (VAPID 키, dartrag push keys 로 만들어 .env 에 넣는다). 비우면 웹 푸시를 쓰지 않음
+    vapid_public_key: str = ""
+    vapid_private_key: str = ""
+    # 푸시 서비스가 문제 있을 때 연락할 곳 (mailto: 또는 https:). 비우면 PUBLIC_URL
+    vapid_subject: str = ""
+
     # 메일 속 링크(인증, 구독 취소)에 쓰는 서비스 주소와 서명용 비밀값
     public_url: str = "http://127.0.0.1:8000"
     allowed_origins: str = ""  # 쉼표로 구분, 예: http://localhost:3000

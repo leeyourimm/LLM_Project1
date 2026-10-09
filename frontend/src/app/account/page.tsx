@@ -1,20 +1,34 @@
 "use client";
 
-import { useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { useApp } from "@/components/providers";
 import { ErrorBox, PageTitle } from "@/components/ui";
-import { del, download, post } from "@/lib/api";
+import { api, del, download, post } from "@/lib/api";
+import type { TwoFactorStatus } from "@/lib/types";
+import { TwoFactorCard } from "./TwoFactorCard";
 
 export default function AccountPage() {
   const { auth } = useApp();
+  const [twoFactor, setTwoFactor] = useState<TwoFactorStatus | null>(null);
+  const signedIn = Boolean(auth?.user);
+  const loadTwoFactor = useCallback(() => {
+    api<TwoFactorStatus>("/api/auth/2fa")
+      .then(setTwoFactor)
+      .catch(() => setTwoFactor(null));
+  }, []);
+  useEffect(() => {
+    if (signedIn) loadTwoFactor();
+  }, [signedIn, loadTwoFactor]);
+
   if (!auth?.user) return <p className="card text-sm">로그인 없이 쓰는 설정에서는 계정 화면이 없습니다.</p>;
   return (
     <div className="max-w-lg space-y-4">
       <PageTitle title="계정" sub={auth.user.email} />
       <EmailCard />
       <PasswordForm />
+      <TwoFactorCard status={twoFactor} reload={loadTwoFactor} />
       <ExportCard />
-      <DeleteAccount />
+      <DeleteAccount needsCode={Boolean(twoFactor?.enabled)} />
     </div>
   );
 }
@@ -128,7 +142,10 @@ function ExportCard() {
       <h2 id="export-title" className="font-semibold">
         내 데이터
       </h2>
-      <p className="text-sm text-muted">계정 정보, 관심 종목, 알림 설정, 질문·답변 기록과 평가를 JSON 파일 하나로 내려받습니다. 비밀번호는 들어 있지 않습니다.</p>
+      <p className="text-sm text-muted">
+        계정 정보, 관심 종목, 알림 설정(웹 푸시를 받는 브라우저 포함), 2단계 인증 사용 여부, 질문·답변 기록과 평가를 JSON 파일 하나로
+        내려받습니다. 비밀번호, 2단계 인증 키, 복구 코드는 들어 있지 않습니다.
+      </p>
       {error ? <ErrorBox error={error} /> : null}
       <button
         type="button"
@@ -152,8 +169,9 @@ function ExportCard() {
   );
 }
 
-function DeleteAccount() {
+function DeleteAccount({ needsCode }: { needsCode: boolean }) {
   const [password, setPassword] = useState("");
+  const [code, setCode] = useState("");
   const [confirm, setConfirm] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<unknown>(null);
@@ -167,7 +185,7 @@ function DeleteAccount() {
         setBusy(true);
         setError(null);
         try {
-          await del("/api/account", { password });
+          await del("/api/account", needsCode ? { password, code } : { password });
           // 화면 상태를 새로 읽으면 로그인 확인이 먼저 돌아 /login?next=/account 로 가므로,
           // 페이지를 새로 열어 깨끗한 로그인 화면으로 보낸다
           window.location.replace("/login");
@@ -182,7 +200,10 @@ function DeleteAccount() {
       </h2>
       <div role="note" className="rounded-lg border border-critical/30 bg-critical-soft px-4 py-3 text-sm">
         <p className="font-semibold">삭제하면 되돌릴 수 없습니다.</p>
-        <p className="mt-1">계정, 관심 종목, 이메일·텔레그램 알림 설정, 질문·답변 기록과 평가가 바로 모두 지워지고 모든 기기에서 로그아웃됩니다. 필요하면 먼저 내 데이터를 내려받으세요.</p>
+        <p className="mt-1">
+          계정, 관심 종목, 이메일·텔레그램·웹 푸시 알림 설정, 2단계 인증, 질문·답변 기록과 평가가 바로 모두 지워지고 모든 기기에서
+          로그아웃됩니다. 필요하면 먼저 내 데이터를 내려받으세요.
+        </p>
       </div>
       <div>
         <label htmlFor="delete-password" className="label">
@@ -199,12 +220,30 @@ function DeleteAccount() {
           onChange={(e) => setPassword(e.target.value)}
         />
       </div>
+      {needsCode ? (
+        <div>
+          <label htmlFor="delete-code" className="label">
+            인증 코드 또는 복구 코드
+          </label>
+          <input
+            id="delete-code"
+            className="input font-mono"
+            autoComplete="one-time-code"
+            autoCapitalize="off"
+            spellCheck={false}
+            required
+            maxLength={20}
+            value={code}
+            onChange={(e) => setCode(e.target.value)}
+          />
+        </div>
+      ) : null}
       <label className="flex items-start gap-2 text-sm">
         <input type="checkbox" required checked={confirm} onChange={(e) => setConfirm(e.target.checked)} className="mt-1" />
         <span>모든 기록이 지워지고 되돌릴 수 없다는 것을 이해했습니다.</span>
       </label>
       {error ? <ErrorBox error={error} /> : null}
-      <button className="btn border-critical text-critical" type="submit" disabled={busy || !confirm || !password}>
+      <button className="btn border-critical text-critical" type="submit" disabled={busy || !confirm || !password || (needsCode && !code)}>
         {busy ? "삭제하는 중…" : "계정 삭제"}
       </button>
     </form>
