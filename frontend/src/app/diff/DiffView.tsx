@@ -85,9 +85,16 @@ export function DiffView() {
   const params = useSearchParams();
   const stock = params.get("stock") ?? "";
   const kind = params.get("kind") ?? "사업보고서";
-  const [text, setText] = useState(stock);
+  // 검색창에는 주소의 종목코드(?stock=005930) 대신 회사 이름을 보여 준다
+  const stockName = companies.find((c) => c.stock_code === stock)?.corp_name;
+  const [text, setText] = useState(stockName ?? stock);
   const [data, setData] = useState<DiffResult | null>(null);
   const [error, setError] = useState<unknown>(null);
+
+  // 바로 연 화면에서는 회사 목록이 늦게 온다. 온 뒤에 이름으로 바꾸되, 그사이 사용자가 고쳐 쓴 글은 그대로 둔다
+  useEffect(() => {
+    if (stockName) setText((t) => (t === stock ? stockName : t));
+  }, [stock, stockName]);
 
   useEffect(() => {
     setData(null);

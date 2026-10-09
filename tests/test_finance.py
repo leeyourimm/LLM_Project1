@@ -45,6 +45,17 @@ def test_find_companies_handles_aliases_and_overlaps():
     assert find_companies("삼성전자우 배당", COMPANIES) == ["00126371"]
 
 
+def test_find_companies_keeps_question_order():
+    # 겹침을 피하려고 긴 이름부터 찾지만 결과는 질문에 나온 순서
+    # (비교 화면은 고른 순서대로 회사 이름을 이어 질문을 만든다)
+    assert find_companies("삼성전자, SK하이닉스의 매출 구성", COMPANIES) == [SAMSUNG, HYNIX]
+    assert find_companies("삼성전자와 삼성전자우, 에스케이하이닉스", COMPANIES) == [
+        SAMSUNG,
+        "00126371",
+        HYNIX,
+    ]
+
+
 def test_ratio_needs_components():
     q = parse_question("2024년 영업이익률", COMPANIES, [SAMSUNG])
     assert q.needed_metrics == ["operating_income", "revenue"]
@@ -124,6 +135,15 @@ def test_finance_tool_latest_year_and_missing_data():
     assert "| 삼성전자 | 2022 | - | 매출액 | 데이터 없음 |" in body
     assert tool.lookup("SK하이닉스 매출액") is None  # 데이터가 하나도 없으면 출처로 안 넣음
     assert tool.lookup("HBM 전략") is None
+
+
+def test_finance_tool_lists_companies_in_question_order():
+    rows = ROWS + [row(2024, 66_193_000_000_000, corp=HYNIX)]
+    question = "삼성전자, SK하이닉스의 주요 사업 부문과 매출 구성을 회사별로 비교해줘"
+    hit = FinanceTool(FakeRepo(rows)).lookup(question)
+    assert hit.chunk["corp_name"] == "삼성전자, 에스케이하이닉스"
+    body = hit.chunk["body"]
+    assert body.index("| 삼성전자 |") < body.index("| 에스케이하이닉스 |")
 
 
 class FakeRetriever:
