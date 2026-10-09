@@ -50,6 +50,9 @@ test("가입 인증 메일 → 비밀번호 재설정 메일 → 새 비밀번�
   await page.getByRole("button", { name: "로그아웃" }).click();
   await expect(page).toHaveURL(/\/login/);
   await page.getByRole("link", { name: "비밀번호를 잊으셨나요?" }).click();
+  // 화면이 바뀌기 전에 입력하면 로그인 화면의 칸에 들어가므로 재설정 화면을 기다린다
+  await expect(page).toHaveURL(/\/forgot-password$/);
+  await expect(page.getByRole("button", { name: "재설정 링크 받기" })).toBeVisible();
   await page.getByLabel("이메일").fill(email);
   await page.getByRole("button", { name: "재설정 링크 받기" }).click();
   await expect(page.getByRole("status")).toContainText("재설정 링크");
@@ -84,6 +87,7 @@ test("가입 인증 메일 → 비밀번호 재설정 메일 → 새 비밀번�
 
 test("없는 계정으로 재설정을 요청해도 같은 안내가 나온다", async ({ page }) => {
   await page.goto("/forgot-password");
+  await expect(page.getByRole("button", { name: "재설정 링크 받기" })).toBeVisible();
   await page.getByLabel("이메일").fill(uniqueEmail("nobody"));
   await page.getByRole("button", { name: "재설정 링크 받기" }).click();
   await expect(page.getByRole("status")).toContainText("가입된 계정이 있으면");
