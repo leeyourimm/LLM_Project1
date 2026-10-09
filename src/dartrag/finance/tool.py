@@ -24,6 +24,8 @@ class FinancialRow:
     amount: int | None
     rcept_no: str
     ord: int | None = None
+    reprt_code: str | None = None
+    add_amount: int | None = None  # 분기·반기 보고서의 누적 금액
 
 
 @dataclass(frozen=True)
@@ -32,10 +34,15 @@ class Value:
     fs_div: str
     account_nm: str
     rcept_no: str
+    add_amount: int | None = None
 
 
-def pick_values(rows: list[FinancialRow], metric: Metric) -> dict[tuple[str, int], Value]:
-    """회사·연도별로 가장 알맞은 계정 하나: 연결 우선, 표준 계정 ID 우선, 계정명 우선순위."""
+def _corp_year(r: FinancialRow) -> tuple:
+    return (r.corp_code, r.bsns_year)
+
+
+def pick_values(rows: list[FinancialRow], metric: Metric, key=_corp_year) -> dict[tuple, Value]:
+    """회사·연도(key)별로 가장 알맞은 계정 하나: 연결 우선, 표준 계정 ID 우선, 계정명 우선순위."""
     names = [n.replace(" ", "") for n in metric.account_names]
 
     def rank(r: FinancialRow):
@@ -43,16 +50,19 @@ def pick_values(rows: list[FinancialRow], metric: Metric) -> dict[tuple[str, int
         by_name = names.index(r.account_nm) if r.account_nm in names else len(names)
         return (r.fs_div != "CFS", not by_id, by_name, r.ord or 0)
 
-    best: dict[tuple[str, int], FinancialRow] = {}
+    best: dict[tuple, FinancialRow] = {}
     for r in rows:
         if r.amount is None:
             continue
         if r.account_id not in metric.account_ids and r.account_nm not in names:
             continue
-        key = (r.corp_code, r.bsns_year)
-        if key not in best or rank(r) < rank(best[key]):
-            best[key] = r
-    return {k: Value(r.amount, r.fs_div, r.account_nm, r.rcept_no) for k, r in best.items()}
+        k = key(r)
+        if k not in best or rank(r) < rank(best[k]):
+            best[k] = r
+    return {
+        k: Value(r.amount, r.fs_div, r.account_nm, r.rcept_no, r.add_amount)
+        for k, r in best.items()
+    }
 
 
 class FinanceTool:

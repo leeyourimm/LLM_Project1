@@ -43,6 +43,9 @@ class Settings(BaseSettings):
     cookie_secure: bool = False  # https 로 서비스할 때 true
     session_days: int = 30
 
+    # PDF 리포트 한글 글꼴(TTF). 비우면 나눔고딕·애플고딕·맑은 고딕을 차례로 찾는다
+    report_font: str | None = None
+
 
 @lru_cache
 def get_settings() -> Settings:

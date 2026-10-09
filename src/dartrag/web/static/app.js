@@ -438,7 +438,9 @@ async function loadCompany(stock) {
       "div",
       { class: "card company-head" },
       el("h2", {}, r.corp_name, el("span", { class: "muted" }, ` ${r.stock_code}`)),
-      watchBtn
+      el("div", { class: "row" },
+        el("a", { class: "button", href: `/api/company/${stock}/report.pdf`, download: "" }, "PDF 리포트"),
+        watchBtn)
     );
     const parts = [head];
     if (r.series.length) {

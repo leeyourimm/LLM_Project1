@@ -236,6 +236,31 @@ def diff(
         typer.echo(text)
 
 
+@app.command()
+def report(
+    stock: Annotated[str, typer.Option("--stock", "-s", help="종목코드")],
+    out: Annotated[Path | None, typer.Option("--out", "-o", help="저장할 PDF 경로")] = None,
+    llm: Annotated[bool, typer.Option(help="사업 개요·위험 요인 요약 넣기 (Ollama 필요)")] = True,
+):
+    """기업 리포트 PDF 만들기 (재무 추이, 분기 실적, 요약, 변경점, 최근 공시)."""
+    from dartrag.factory import Backends, build_answerer
+    from dartrag.report import build_report, render_pdf
+
+    settings = get_settings()
+    repo = Repository.connect(settings.database_url)
+    answerer = build_answerer(Backends(settings), repo) if llm else None
+    try:
+        data = build_report(repo, stock, answerer=answerer)
+    except LookupError as e:
+        typer.echo(f"{e}. collect 를 먼저 실행하세요.", err=True)
+        raise typer.Exit(1) from None
+    out = out or Path(f"report_{stock}_{data.generated_at:%Y%m%d}.pdf")
+    out.write_bytes(render_pdf(data, settings.report_font))
+    for note in data.notes:
+        typer.echo(f"참고: {note}", err=True)
+    typer.echo(f"→ {out}")
+
+
 feed_app = typer.Typer(help="주요 공시 피드와 알림")
 app.add_typer(feed_app, name="feed")
 watch_app = typer.Typer(help="알림 받을 관심 종목")
