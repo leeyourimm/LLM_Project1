@@ -10,11 +10,15 @@ log = logging.getLogger(__name__)
 
 
 class Backends:
-    """무거운 모델·클라이언트는 처음 쓸 때 한 번만 만든다 (스레드 안전)."""
+    """무거운 모델·클라이언트는 처음 쓸 때 한 번만 만든다 (스레드 안전).
+
+    vector 처럼 만드는 도중에 다른 것(qdrant)을 꺼내는 경우가 있어서, 같은 스레드가
+    다시 잡을 수 있는 RLock 을 쓴다. 보통 Lock 이면 그 자리에서 영원히 멈춘다.
+    """
 
     def __init__(self, settings: Settings):
         self.settings = settings
-        self._lock = threading.Lock()
+        self._lock = threading.RLock()
         self._cache: dict = {}
 
     def _get(self, name: str, make):
