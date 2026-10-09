@@ -1,0 +1,197 @@
+# 실제 서비스 종단 점검: 단위 테스트의 가짜 대신 진짜 Postgres, Redis, Qdrant, OpenSearch(nori),
+# Ollama 와 진짜 임베딩·리랭커 모델로 dartrag index·serve 를 돌려 질문 하나에 끝까지 답하게 한다.
+# 백엔드 조립(dartrag.factory) 같은 배선 문제는 여기서만 드러난다. 순서는 tests/smoke/run_smoke.py
+#
+# 빨리 돌도록 작은 모델을 쓴다. 배포 기본값(bge-m3, bge-reranker-v2-m3, qwen3:8b)과 코드 경로는 같다.
+name: Smoke
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: smoke-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  real-stack:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: dartrag
+          POSTGRES_PASSWORD: dartrag
+          POSTGRES_DB: dartrag
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U dartrag -d dartrag"
+          --health-interval 5s
+          --health-retries 10
+      redis:
+        image: redis:7
+        ports: ["6379:6379"]
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-retries 10
+      # infra/prod/docker-compose.yml 과 같은 버전
+      qdrant:
+        image: qdrant/qdrant:v1.19.2
+        ports: ["6333:6333"]
+    env:
+      SMOKE: "1"
+      DATABASE_URL: postgresql://dartrag:dartrag@127.0.0.1:5432/dartrag
+      REDIS_URL: redis://127.0.0.1:6379/0
+      QDRANT_URL: http://127.0.0.1:6333
+      OPENSEARCH_URL: http://127.0.0.1:9200
+      OLLAMA_URL: http://127.0.0.1:11434
+      # 작은 다국어 임베딩 모델과 작은 리랭커
+      EMBED_MODEL: sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2
+      RERANK_MODEL: cross-encoder/ms-marco-MiniLM-L6-v2
+      # 작은 답변 모델. 같은 모델에 답변 길이 상한만 붙인 dartrag-smoke 를 만들어 쓴다
+      # (아주 작은 모델은 같은 말을 끝없이 되풀이할 때가 있다)
+      OLLAMA_IMAGE: ollama/ollama:0.12.3
+      OLLAMA_BASE_MODEL: qwen3:0.6b
+      LLM_MODEL: dartrag-smoke
+      LLM_TIMEOUT: "180"
+      HF_HUB_DISABLE_TELEMETRY: "1"
+      TOKENIZERS_PARALLELISM: "false"
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: 받아 둔 Ollama 모델
+        id: ollama-cache
+        uses: actions/cache/restore@v6
+        with:
+          path: ~/.ollama-smoke
+          key: ollama-${{ env.OLLAMA_IMAGE }}-${{ env.OLLAMA_BASE_MODEL }}-v1
+
+      # 서비스 컨테이너는 빌드할 수 없어서, nori 를 넣은 OpenSearch(infra/opensearch)는 직접 빌드해 띄운다.
+      # 이미지 받기·빌드가 오래 걸리므로 Ollama 와 함께 뒤에서 돌리고 그동안 파이썬 패키지를 설치한다
+      - name: OpenSearch(nori)·Ollama 띄우기 (뒤에서)
+        run: |
+          mkdir -p "$RUNNER_TEMP/bg" "$HOME/.ollama-smoke"
+          # 끝나면 <이름>.rc 에 종료 코드를 남긴다. 출력을 모두 파일로 돌려야 이 단계가 기다리지 않고 끝난다
+          {
+            set +e
+            (
+              set -e
+              docker build -t dartrag-opensearch infra/opensearch
+              docker run -d --name opensearch -p 127.0.0.1:9200:9200 \
+                -e discovery.type=single-node \
+                -e DISABLE_SECURITY_PLUGIN=true \
+                -e DISABLE_INSTALL_DEMO_CONFIG=true \
+                -e "OPENSEARCH_JAVA_OPTS=-Xms512m -Xmx512m" \
+                dartrag-opensearch
+            ) > "$RUNNER_TEMP/bg/opensearch.log" 2>&1
+            echo $? > "$RUNNER_TEMP/bg/opensearch.rc"
+          } > /dev/null 2>&1 < /dev/null &
+          {
+            set +e
+            (
+              set -e
+              docker run -d --name ollama -p 127.0.0.1:11434:11434 \
+                -v "$HOME/.ollama-smoke:/root/.ollama" "$OLLAMA_IMAGE"
+              for _ in $(seq 60); do
+                curl -fsS "$OLLAMA_URL/api/version" && break
+                sleep 1
+              done
+              echo
+              curl -fsS --max-time 600 "$OLLAMA_URL/api/pull" \
+                -d "{\"model\": \"$OLLAMA_BASE_MODEL\", \"stream\": false}"
+              echo
+              curl -fsS --max-time 120 "$OLLAMA_URL/api/create" \
+                -d "{\"model\": \"$LLM_MODEL\", \"from\": \"$OLLAMA_BASE_MODEL\", \"parameters\": {\"num_predict\": 256}, \"stream\": false}"
+              echo
+            ) > "$RUNNER_TEMP/bg/ollama.log" 2>&1
+            echo $? > "$RUNNER_TEMP/bg/ollama.rc"
+          } > /dev/null 2>&1 < /dev/null &
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: |
+            requirements/torch.txt
+            requirements/runtime.txt
+
+      # 배포 이미지(Dockerfile)와 같은 방식: CPU 전용 PyTorch, 잠금 파일, 저장소 없이 쓰는 설치(-e 아님)
+      - name: 패키지 설치
+        run: |
+          pip install --no-deps -r requirements/torch.txt --index-url https://download.pytorch.org/whl/cpu
+          pip install --no-deps --require-hashes -r requirements/runtime.txt
+          pip install --no-deps . && pip check
+
+      - name: 받아 둔 임베딩·리랭커 모델
+        id: hf-cache
+        uses: actions/cache/restore@v6
+        with:
+          path: ~/.cache/huggingface
+          key: hf-${{ env.EMBED_MODEL }}-${{ env.RERANK_MODEL }}-v1
+
+      # 내려받기만 미리 해 두어, 아래 점검의 시간이 내려받기 속도에 흔들리지 않게 한다
+      - name: 임베딩·리랭커 모델 내려받기
+        if: steps.hf-cache.outputs.cache-hit != 'true'
+        run: |
+          python - <<'EOF'
+          import os
+          from sentence_transformers import CrossEncoder, SentenceTransformer
+
+          SentenceTransformer(os.environ["EMBED_MODEL"])
+          CrossEncoder(os.environ["RERANK_MODEL"])
+          EOF
+
+      - name: 임베딩·리랭커 모델 저장
+        if: steps.hf-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v6
+        with:
+          path: ~/.cache/huggingface
+          key: ${{ steps.hf-cache.outputs.cache-primary-key }}
+
+      - name: OpenSearch·Ollama 준비 기다리기
+        timeout-minutes: 10
+        run: |
+          for name in opensearch ollama; do
+            until [ -f "$RUNNER_TEMP/bg/$name.rc" ]; do sleep 2; done
+            echo "::group::$name"
+            cat "$RUNNER_TEMP/bg/$name.log"
+            echo "::endgroup::"
+            if [ "$(cat "$RUNNER_TEMP/bg/$name.rc")" != 0 ]; then
+              echo "::error::$name 준비 실패"
+              exit 1
+            fi
+          done
+
+      - name: Ollama 모델 저장
+        if: steps.ollama-cache.outputs.cache-hit != 'true'
+        run: sudo chown -R "$(id -u):$(id -g)" "$HOME/.ollama-smoke"
+      - if: steps.ollama-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v6
+        with:
+          path: ~/.ollama-smoke
+          key: ${{ steps.ollama-cache.outputs.cache-primary-key }}
+
+      - name: 종단 점검
+        timeout-minutes: 15
+        env:
+          SMOKE_LOG_DIR: ${{ runner.temp }}/smoke
+        run: python tests/smoke/run_smoke.py
+
+      - name: 실패하면 서비스 로그
+        if: failure()
+        run: |
+          for c in opensearch ollama; do
+            echo "::group::$c"
+            docker logs --tail 60 "$c" || true
+            echo "::endgroup::"
+          done
+
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: smoke-logs
+          path: ${{ runner.temp }}/smoke
+          retention-days: 7

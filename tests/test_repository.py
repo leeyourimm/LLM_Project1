@@ -78,6 +78,31 @@ def test_roundtrip(repo):
     assert rows == [(200,)]
 
 
+def test_batch_writes_are_committed_after_a_read(repo):
+    # 읽기만 해도 트랜잭션이 열린다. 그 뒤의 묶음 쓰기(conn.transaction 블록)는 savepoint 가
+    # 되어 커밋되지 않았고, dartrag parse 가 끝나며 연결을 닫으면 청크가 모두 사라졌다
+    from dartrag.parsing import Chunk
+
+    repo.upsert_companies([Corp(corp_code="00126380", corp_name="삼성전자", stock_code="005930")])
+    filing = Filing(
+        corp_code="00126380",
+        corp_name="삼성전자",
+        report_nm="사업보고서 (2024.12)",
+        rcept_no="20250311000001",
+        rcept_dt=date(2025, 3, 11),
+    )
+    repo.upsert_filing(filing, parse_report_name(filing.report_nm), "11011", "documents/x.zip")
+    assert repo.filings_to_parse(1)  # 읽기: 트랜잭션이 열린 채로 남는다
+    chunk = Chunk("c0", "text", ["I. 개요"], "ctx", "body", 0)
+    repo.replace_chunks("20250311000001", "00126380", [("a.xml", [chunk])], 1)
+    repo.replace_financials("00126380", 2024, "11011", "CFS", [item(100)])
+
+    with psycopg.connect(URL) as other:  # 다른 연결(다른 프로세스)에서도 보여야 한다
+        assert other.execute("SELECT count(*) FROM chunks").fetchone() == (1,)
+        assert other.execute("SELECT count(*) FROM financial_items").fetchone() == (1,)
+        assert other.execute("SELECT parser_version FROM filings").fetchone() == (1,)
+
+
 def test_chunks_replace_and_parse_state(repo):
     from dartrag.parsing import Chunk
 

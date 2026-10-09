@@ -36,6 +36,8 @@ COPY requirements/runtime.txt ./requirements/
 RUN pip install --no-deps --require-hashes -r requirements/runtime.txt
 COPY pyproject.toml ./
 COPY src ./src
+# DB 스키마는 패키지 안(dartrag/db/schema)에 함께 들어간다
+COPY infra/db ./infra/db
 RUN pip install --no-deps . && pip check
 
 # --- 2단계: 실행 이미지 ---

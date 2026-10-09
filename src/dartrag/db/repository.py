@@ -1,4 +1,5 @@
-from collections.abc import Iterable
+from collections.abc import Iterable, Iterator
+from contextlib import contextmanager
 from pathlib import Path
 
 import psycopg
@@ -8,7 +9,16 @@ from dartrag.dart.reports import PeriodicReport
 from dartrag.parsing import Chunk
 from dartrag.search.types import IndexedChunk
 
-SCHEMA_DIR = Path(__file__).resolve().parents[3] / "infra" / "db"
+
+def _schema_dir() -> Path:
+    """설치한 패키지(배포 이미지)에는 wheel 에 함께 넣은 schema/ (pyproject 의 force-include),
+    저장소에서 바로 돌릴 때(pip install -e)는 infra/db."""
+    here = Path(__file__).resolve().parent
+    packaged = here / "schema"
+    return packaged if packaged.is_dir() else here.parents[2] / "infra" / "db"
+
+
+SCHEMA_DIR = _schema_dir()
 
 
 class Repository:
@@ -19,8 +29,22 @@ class Repository:
     def connect(cls, url: str) -> "Repository":
         return cls(psycopg.connect(url))
 
+    @contextmanager
+    def _atomic(self) -> Iterator[psycopg.Cursor]:
+        """여러 문장을 한꺼번에 쓰고 커밋한다 (중간에 실패하면 모두 되돌린다).
+
+        앞서 읽기만 하고 커밋하지 않아 트랜잭션이 열려 있으면 conn.transaction() 은 savepoint 만
+        만들고 커밋하지 않는다. 그대로 두면 연결을 닫을 때 쓴 것이 모두 사라진다."""
+        with self.conn.transaction(), self.conn.cursor() as cur:
+            yield cur
+        self.conn.commit()
+
     def migrate(self) -> None:
-        for path in sorted(SCHEMA_DIR.glob("*.sql")):
+        paths = sorted(SCHEMA_DIR.glob("*.sql"))
+        if not paths:
+            # 없는데 그냥 넘어가면 "스키마 적용 완료"라고 하고 아무것도 적용하지 않는다
+            raise RuntimeError(f"DB 스키마 파일(*.sql)을 찾지 못했습니다: {SCHEMA_DIR}")
+        for path in paths:
             self.conn.execute(path.read_text())
         self.conn.commit()
 
@@ -97,7 +121,7 @@ class Repository:
         self, corp_code: str, bsns_year: int, reprt_code: str, fs_div: str, items: list[dict]
     ) -> int:
         """한 보고서·한 재무제표 구분의 수치를 통째로 교체 (정정공시 반영, 재실행 안전)."""
-        with self.conn.transaction(), self.conn.cursor() as cur:
+        with self._atomic() as cur:
             cur.execute(
                 """DELETE FROM financial_items
                    WHERE corp_code = %s AND bsns_year = %s AND reprt_code = %s AND fs_div = %s""",
@@ -157,7 +181,7 @@ class Repository:
             for source_file, chunks in chunks_by_file
             for c in chunks
         ]
-        with self.conn.transaction(), self.conn.cursor() as cur:
+        with self._atomic() as cur:
             cur.execute("DELETE FROM chunks WHERE rcept_no = %s", (rcept_no,))
             cur.executemany(
                 """
@@ -491,7 +515,7 @@ class Repository:
     def insert_disclosures(self, rows: list[dict]) -> list[str]:
         """새 공시만 넣고, 새로 들어간 접수번호를 돌려준다."""
         new: list[str] = []
-        with self.conn.transaction(), self.conn.cursor() as cur:
+        with self._atomic() as cur:
             for r in rows:
                 cur.execute(
                     """
@@ -1571,7 +1595,7 @@ class Repository:
     def replace_issues(self, corp_code: str, issues) -> None:
         """검증 결과 교체. 해결된 문제는 지우고 계속되는 문제는 처음 본 시각을 지킨다."""
         issues = list(issues)
-        with self.conn.transaction(), self.conn.cursor() as cur:
+        with self._atomic() as cur:
             before = cur.execute(
                 """SELECT bsns_year, reprt_code, fs_div, rule, first_seen, severity, detail
                    FROM data_issues WHERE corp_code = %s""",
