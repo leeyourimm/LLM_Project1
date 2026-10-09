@@ -115,6 +115,7 @@ class Repository:
                 items,
             )
             self._bump_data_version(cur)
+            self._bump_company_versions(cur, [corp_code])
         return len(items)
 
     def filings_to_parse(self, parser_version: int, corp_codes: list[str] | None = None):
@@ -239,6 +240,87 @@ class Repository:
     def data_version(self) -> int:
         row = self.conn.execute("SELECT value FROM app_state WHERE key = 'data_version'").fetchone()
         return row[0] if row else 0
+
+    # --- 회사별 데이터 버전 (기업 대시보드 캐시 무효화용) ---------------------
+
+    @staticmethod
+    def _bump_company_versions(executor, corp_codes) -> None:
+        """재무 수치, 주요 공시, 검증 결과처럼 대시보드에 보이는 회사 데이터가 바뀔 때 부른다."""
+        codes = sorted(set(corp_codes))
+        if codes:
+            executor.execute(
+                """INSERT INTO company_versions (corp_code)
+                   SELECT unnest(%s::text[])
+                   ON CONFLICT (corp_code) DO UPDATE
+                   SET version = company_versions.version + 1, updated_at = now()""",
+                (codes,),
+            )
+
+    def company_version(self, corp_code: str) -> str:
+        """캐시 키용 회사 데이터 버전. 회사 정보(이름 등)가 바뀌어도 달라진다."""
+        row = self.conn.execute(
+            """SELECT COALESCE(v.version, 0), c.updated_at
+               FROM companies c LEFT JOIN company_versions v USING (corp_code)
+               WHERE c.corp_code = %s""",
+            (corp_code,),
+        ).fetchone()
+        if row is None:
+            return "0"
+        return f"{row[0]}.{round(row[1].timestamp() * 1_000_000)}"
+
+    def watched_companies(self) -> list[tuple[str, str, str]]:
+        """운영자나 사용자 누군가가 관심 종목에 넣은 상장사 (대시보드 미리 만들기 대상)."""
+        return self.conn.execute(
+            """SELECT c.corp_code, c.corp_name, c.stock_code FROM companies c
+               WHERE c.stock_code IS NOT NULL AND (
+                   EXISTS (SELECT 1 FROM watchlist w WHERE w.corp_code = c.corp_code)
+                   OR EXISTS (SELECT 1 FROM user_watchlist u WHERE u.corp_code = c.corp_code))
+               ORDER BY c.corp_name"""
+        ).fetchall()
+
+    def companies_by_code(self, corp_codes: list[str]) -> list[tuple[str, str, str]]:
+        return self.conn.execute(
+            """SELECT corp_code, corp_name, stock_code FROM companies
+               WHERE corp_code = ANY(%s) AND stock_code IS NOT NULL ORDER BY corp_name""",
+            (corp_codes,),
+        ).fetchall()
+
+    def filing_freshness(self, rcept_nos: list[str]) -> dict[str, dict]:
+        """인용한 공시마다 그 공시의 정보와, 같은 회사의 가장 최근 정기공시.
+
+        답변 신뢰도 표시에 쓴다 (인용한 자료가 최신 공시인지, 얼마나 오래됐는지).
+        정정공시도 따로 접수되므로 원본을 인용했는데 정정본이 있으면 최신이 아니다."""
+        if not rcept_nos:
+            return {}
+        rows = self.conn.execute(
+            """
+            SELECT f.rcept_no, f.corp_code, c.corp_name, f.report_nm, f.rcept_dt,
+                   l.rcept_no, l.report_nm, l.rcept_dt, l.indexed_at IS NOT NULL
+            FROM filings f
+            JOIN companies c USING (corp_code)
+            LEFT JOIN LATERAL (
+                SELECT rcept_no, report_nm, rcept_dt, indexed_at FROM filings
+                WHERE corp_code = f.corp_code AND report_kind IS NOT NULL
+                ORDER BY rcept_dt DESC, rcept_no DESC LIMIT 1
+            ) l ON true
+            WHERE f.rcept_no = ANY(%s)
+            """,
+            (list(rcept_nos),),
+        ).fetchall()
+        out = {}
+        for r in rows:
+            latest = None
+            if r[5] is not None:
+                latest = {"rcept_no": r[5], "report_nm": r[6], "rcept_dt": r[7], "indexed": r[8]}
+            out[r[0]] = {
+                "rcept_no": r[0],
+                "corp_code": r[1],
+                "corp_name": r[2],
+                "report_nm": r[3],
+                "rcept_dt": r[4],
+                "latest": latest,
+            }
+        return out
 
     def expand_chunks(
         self, chunk_ids: list[str], window: int = 1, max_chars: int = 3000
@@ -420,6 +502,9 @@ class Repository:
                 )
                 if cur.fetchone():
                     new.append(r["rcept_no"])
+            self._bump_company_versions(
+                cur, [r["corp_code"] for r in rows if r["rcept_no"] in set(new)]
+            )
         return new
 
     def recent_disclosures(
@@ -1195,15 +1280,21 @@ class Repository:
 
     def replace_issues(self, corp_code: str, issues) -> None:
         """검증 결과 교체. 해결된 문제는 지우고 계속되는 문제는 처음 본 시각을 지킨다."""
+        issues = list(issues)
         with self.conn.transaction(), self.conn.cursor() as cur:
-            first_seen = {
-                tuple(r[:4]): r[4]
-                for r in cur.execute(
-                    """SELECT bsns_year, reprt_code, fs_div, rule, first_seen
-                       FROM data_issues WHERE corp_code = %s""",
-                    (corp_code,),
-                ).fetchall()
+            before = cur.execute(
+                """SELECT bsns_year, reprt_code, fs_div, rule, first_seen, severity, detail
+                   FROM data_issues WHERE corp_code = %s""",
+                (corp_code,),
+            ).fetchall()
+            first_seen = {tuple(r[:4]): r[4] for r in before}
+            # 대시보드에 보이는 내용이 같으면 회사 버전을 그대로 둔다 (밤마다 전체 검증을 돌린다)
+            shown = {(*r[:4], r[5], r[6]) for r in before}
+            after = {
+                (i.bsns_year, i.reprt_code, i.fs_div, i.rule, i.severity, i.detail) for i in issues
             }
+            if shown != after:
+                self._bump_company_versions(cur, [corp_code])
             cur.execute("DELETE FROM data_issues WHERE corp_code = %s", (corp_code,))
             cur.executemany(
                 """INSERT INTO data_issues (corp_code, bsns_year, reprt_code, fs_div, rule,

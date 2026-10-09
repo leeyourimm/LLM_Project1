@@ -8,9 +8,10 @@ from fastapi import APIRouter, HTTPException, Path, Query
 from fastapi.responses import Response
 from pydantic import BaseModel, Field
 
+from dartrag.answer.evidence import quoted
 from dartrag.changes.summary import DART_URL
 from dartrag.search import SearchFilter
-from dartrag.web.chat import DISCLAIMER, _no_limit, source_dict
+from dartrag.web.chat import DISCLAIMER, _no_limit, _sources
 
 STOCK = r"^\d{6}$"
 COMPARE_TOPICS = {
@@ -49,18 +50,9 @@ def build_router(services, rate=_no_limit) -> APIRouter:
         stock: Annotated[str, Path(pattern=STOCK)],
         count: Annotated[int, Query(ge=4, le=40)] = 12,
     ):
-        from dartrag.finance.series import quarterly_series
-
         with services.repo() as repo:
-            code, name, stock_code = company_or_404(repo, stock)
-            points = quarterly_series(repo, code, count)
-        return {
-            "corp_code": code,
-            "corp_name": name,
-            "stock_code": stock_code,
-            "quarters": [asdict(p) | {"label": p.label} for p in points],
-            "note": "4분기는 연간 금액에서 3분기 누적 금액을 빼서 계산합니다 (derived).",
-        }
+            corp = company_or_404(repo, stock)
+            return services.dashboards.quarters(repo, tuple(corp), count)
 
     @router.get("/api/compare")
     def compare(
@@ -109,10 +101,7 @@ def build_router(services, rate=_no_limit) -> APIRouter:
             "answer": result.text,
             "found": result.found,
             "warnings": result.warnings,
-            "sources": [
-                source_dict(i, h) | {"cited": i in cited}
-                for i, h in enumerate(result.hits, start=1)
-            ],
+            "sources": _sources(result.hits, cited, quoted(result)),
             "model": answerer.llm.name,
             "disclaimer": DISCLAIMER,
         }

@@ -33,6 +33,8 @@ class Settings(BaseSettings):
     answer_cache: bool = True
     semantic_cache: bool = True
     answer_cache_ttl: int = 7 * 86400
+    # 기업 대시보드 캐시 보관 시간(초). 회사 데이터가 바뀌면 이보다 먼저 새로 만든다
+    dashboard_cache_ttl: int = 6 * 3600
 
     # 공시 알림 웹훅 (Slack·Discord). 비워 두면 터미널에만 출력
     alert_webhook_url: str = ""
@@ -70,6 +72,8 @@ class Settings(BaseSettings):
     feed_poll_minutes: int = 10
     ingest_minutes: int = 5
     alerts_minutes: int = 5
+    # 관심 종목 회사의 대시보드를 미리 만드는 주기 (바뀐 회사만 다시 만든다)
+    dashboard_warm_minutes: int = 15
     backfill_enabled: bool = False  # 전체 상장사 과거 데이터 채우기 (며칠 걸림)
     backfill_start_year: int = 2015
     backfill_batch: int = 20  # 한 번에 처리할 회사 수
