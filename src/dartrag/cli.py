@@ -4,7 +4,7 @@ from typing import Annotated
 import typer
 
 from dartrag.config import get_settings
-from dartrag.dart import OpenDartClient
+from dartrag.dart import DartApiError, OpenDartClient
 from dartrag.db import Repository
 from dartrag.pipeline.collect import collect
 from dartrag.storage import make_raw_store
@@ -47,18 +47,28 @@ def collect_cmd(
 ):
     """정기공시 원문과 재무제표 수집."""
     logging.basicConfig(level=logging.INFO)
+    # httpx 요청 로그에는 인증키가 쿼리 문자열로 찍히므로 끈다
+    logging.getLogger("httpx").setLevel(logging.WARNING)
     settings = get_settings()
     repo = Repository.connect(settings.database_url)
-    with OpenDartClient(settings.dart_api_key, min_interval=settings.dart_min_interval) as client:
-        summary = collect(
-            client,
-            repo,
-            make_raw_store(settings),
-            stocks or DEFAULT_STOCKS,
-            start_year,
-            end_year,
-            download_documents=not no_documents,
-        )
+    try:
+        with OpenDartClient(
+            settings.dart_api_key, min_interval=settings.dart_min_interval
+        ) as client:
+            summary = collect(
+                client,
+                repo,
+                make_raw_store(settings),
+                stocks or DEFAULT_STOCKS,
+                start_year,
+                end_year,
+                download_documents=not no_documents,
+            )
+    except DartApiError as e:
+        typer.echo(f"OpenDART 오류로 수집을 멈췄습니다: {e}", err=True)
+        if e.status == "800":
+            typer.echo("OpenDART 시스템 점검 중입니다. 점검이 끝난 뒤 다시 실행하세요.", err=True)
+        raise typer.Exit(1) from None
     typer.echo(
         f"기업 {summary.companies}, 공시 {summary.filings}, "
         f"원문 신규 {summary.documents_downloaded} / 캐시 {summary.documents_cached}, "
