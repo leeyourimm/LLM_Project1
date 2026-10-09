@@ -440,5 +440,73 @@ def eval_run(
         raise typer.Exit(1)
 
 
+@app.command()
+def doctor(offline: bool = False):
+    """실행 전 준비 상태 점검 (인증키, Docker 서비스, 검색, Ollama)."""
+    from dartrag.doctor import all_ok, format_checks, run_checks
+
+    logging.getLogger("httpx").setLevel(logging.WARNING)
+    checks = run_checks(get_settings(), online=not offline)
+    typer.echo(format_checks(checks))
+    if all_ok(checks):
+        typer.echo("\n준비 완료. dartrag run 으로 수집부터 평가까지 한 번에 실행할 수 있습니다.")
+        return
+    typer.echo("\n❌ 표시를 위에서부터 고친 뒤 dartrag doctor 를 다시 실행하세요.", err=True)
+    raise typer.Exit(1)
+
+
+def _step(name: str, fn, *args, **kwargs) -> tuple[str, int, float]:
+    import time
+
+    typer.echo(f"\n━━ {name} ━━")
+    started = time.monotonic()
+    try:
+        fn(*args, **kwargs)
+        code = 0
+    except typer.Exit as e:
+        code = e.exit_code
+    return name, code, time.monotonic() - started
+
+
+@app.command("run")
+def run_all(
+    stocks: Annotated[list[str] | None, typer.Option("--stock", "-s", help="종목코드")] = None,
+    start_year: int = 2022,
+    end_year: int = 2024,
+    feed_days: int = 30,
+    eval_limit: Annotated[int, typer.Option(help="평가 문항 수. 0 이면 평가 생략")] = 40,
+):
+    """준비 점검 → 수집 → 파싱 → 색인 → 공시 피드 → 평가를 차례로 실행."""
+    from dartrag.doctor import all_ok, format_checks, run_checks
+
+    logging.getLogger("httpx").setLevel(logging.WARNING)
+    checks = run_checks(get_settings())
+    typer.echo(format_checks(checks))
+    if not all_ok(checks):
+        typer.echo("\n준비가 덜 됐습니다. ❌ 항목을 고친 뒤 다시 실행하세요.", err=True)
+        raise typer.Exit(1)
+
+    results = [
+        _step("1. 수집", collect_cmd, stocks, start_year, end_year, False),
+        _step("2. 파싱", parse),
+        _step("3. 색인", index),
+        _step("4. 공시 피드", feed_poll, feed_days, 0, False),
+    ]
+    if eval_limit:
+        generated = Path("eval/generated.jsonl")
+        results.append(_step("5. 평가 문항 생성", eval_generate, generated, 8, 0))
+        files = [Path("eval/manual.jsonl")] + ([generated] if generated.exists() else [])
+        results.append(_step("6. 평가", eval_run, files, Path("reports/eval"), eval_limit, None))
+
+    typer.echo("\n━━ 요약 ━━")
+    for name, code, secs in results:
+        typer.echo(f"{'✅' if code == 0 else '❌'} {name} ({secs / 60:.1f}분)")
+    failed = [name for name, code, _ in results if code]
+    if failed:
+        typer.echo("일부 단계에 오류가 있습니다. 위 로그의 '오류:' 줄을 확인하세요.", err=True)
+    typer.echo("웹 화면은 dartrag serve 로 열 수 있습니다.")
+    raise typer.Exit(1 if failed else 0)
+
+
 if __name__ == "__main__":
     app()
