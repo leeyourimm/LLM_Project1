@@ -113,7 +113,7 @@ def build_router(services, rate=_no_limit) -> APIRouter:
                 source_dict(i, h) | {"cited": i in cited}
                 for i, h in enumerate(result.hits, start=1)
             ],
-            "model": answerer.llm.name,
+            "model": result.model or answerer.llm.name,
             "disclaimer": DISCLAIMER,
         }
 

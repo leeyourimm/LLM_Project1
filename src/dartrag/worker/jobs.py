@@ -272,7 +272,7 @@ def evaluate(ctx: Context, repo, limit: int | None = None, eval_dir: str = "eval
         "cases": len(cases),
         "files": f"scheduled (seed {seed})",
     }
-    answerer = build_answerer(ctx.backends, repo, use_cache=False)
+    answerer = build_answerer(ctx.backends, repo, use_cache=False, use_fallback=False)
     result = run_and_record(repo, answerer, cases, Path("reports/eval"), meta)
     return {
         "cases": len(cases),

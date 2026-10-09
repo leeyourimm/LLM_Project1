@@ -27,6 +27,14 @@ class Settings(BaseSettings):
 
     ollama_url: str = "http://localhost:11434"
     llm_model: str = "qwen3:8b"
+    # LLM 게이트웨이 (answer/gateway.py): 시간 제한, 일시적 오류 재시도, 대체 모델
+    # 대체 모델은 LLM_FALLBACK_MODEL 을 넣을 때만 쓴다 (예: 더 작은 qwen3:1.7b, 미리 ollama pull)
+    llm_fallback_model: str = ""
+    llm_timeout: float = 300  # 요청 하나가 끝날 때까지 기다리는 최대 시간(초). 0 이면 제한 없음
+    # 대체 모델이 있을 때만: 기본 모델이 이 시간(초) 안에 첫 글자를 못 내면 대체 모델로 넘긴다
+    llm_first_token_timeout: float = 30
+    llm_retries: int = 2  # 연결 실패·5xx 같은 일시적 오류에 다시 보낼 횟수
+    llm_retry_backoff: float = 0.5  # 첫 재시도 전 기다리는 시간(초). 다시 할 때마다 두 배
 
     # 답변 캐시 (Redis). redis_url 을 비우면 캐시 없이 동작
     redis_url: str = "redis://localhost:6379/0"

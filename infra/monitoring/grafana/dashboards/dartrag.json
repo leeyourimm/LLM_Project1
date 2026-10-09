@@ -502,21 +502,113 @@
       }
     },
     {
-      "type": "row",
+      "type": "timeseries",
       "id": 13,
+      "title": "LLM 요청: 답한 모델 (시간당)",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 31
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "sum by (model, outcome) (increase(dartrag_llm_requests_total[1h]))",
+          "legendFormat": "{{model}} {{outcome}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "lineWidth": 2,
+            "fillOpacity": 10,
+            "stacking": {
+              "mode": "normal"
+            },
+            "showPoints": "never"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        }
+      },
+      "description": "ok: 기본 모델이 답함, fallback: 기본 모델이 실패하거나 첫 글자가 늦어 대체 모델이 답함, error: 모두 실패"
+    },
+    {
+      "type": "timeseries",
+      "id": 14,
+      "title": "LLM 실패한 시도 (시간당)",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 31
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "sum by (model, kind) (increase(dartrag_llm_failures_total[1h]))",
+          "legendFormat": "{{model}} {{kind}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "lineWidth": 2,
+            "fillOpacity": 10,
+            "stacking": {
+              "mode": "normal"
+            },
+            "showPoints": "never"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        }
+      },
+      "description": "connect·timeout·server·disconnect 는 다시 보냄, missing: 모델 없음(ollama pull), deadline: 게이트웨이 시간 제한"
+    },
+    {
+      "type": "row",
+      "id": 15,
       "title": "정기 평가",
       "collapsed": false,
       "gridPos": {
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 31
+        "y": 39
       },
       "panels": []
     },
     {
       "type": "stat",
-      "id": 14,
+      "id": 16,
       "title": "배포 기준",
       "datasource": {
         "type": "prometheus",
@@ -526,7 +618,7 @@
         "h": 5,
         "w": 6,
         "x": 0,
-        "y": 32
+        "y": 40
       },
       "targets": [
         {
@@ -564,7 +656,7 @@
     },
     {
       "type": "stat",
-      "id": 15,
+      "id": 17,
       "title": "최근 평가 결과",
       "datasource": {
         "type": "prometheus",
@@ -574,7 +666,7 @@
         "h": 5,
         "w": 12,
         "x": 6,
-        "y": 32
+        "y": 40
       },
       "targets": [
         {
@@ -597,7 +689,7 @@
     },
     {
       "type": "stat",
-      "id": 16,
+      "id": 18,
       "title": "평가 후 지난 시간",
       "datasource": {
         "type": "prometheus",
@@ -607,7 +699,7 @@
         "h": 5,
         "w": 6,
         "x": 18,
-        "y": 32
+        "y": 40
       },
       "targets": [
         {
@@ -630,20 +722,20 @@
     },
     {
       "type": "row",
-      "id": 17,
+      "id": 19,
       "title": "데이터 수집과 작업자",
       "collapsed": false,
       "gridPos": {
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 37
+        "y": 45
       },
       "panels": []
     },
     {
       "type": "bargauge",
-      "id": 18,
+      "id": 20,
       "title": "작업별 마지막 성공 후 지난 시간",
       "datasource": {
         "type": "prometheus",
@@ -653,7 +745,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 38
+        "y": 46
       },
       "targets": [
         {
@@ -679,7 +771,7 @@
     },
     {
       "type": "stat",
-      "id": 19,
+      "id": 21,
       "title": "실패한 작업",
       "datasource": {
         "type": "prometheus",
@@ -689,7 +781,7 @@
         "h": 4,
         "w": 4,
         "x": 12,
-        "y": 38
+        "y": 46
       },
       "targets": [
         {
@@ -710,7 +802,7 @@
     },
     {
       "type": "stat",
-      "id": 20,
+      "id": 22,
       "title": "처리 대기 보고서",
       "datasource": {
         "type": "prometheus",
@@ -720,7 +812,7 @@
         "h": 4,
         "w": 4,
         "x": 16,
-        "y": 38
+        "y": 46
       },
       "targets": [
         {
@@ -741,7 +833,7 @@
     },
     {
       "type": "stat",
-      "id": 21,
+      "id": 23,
       "title": "데이터 검증",
       "datasource": {
         "type": "prometheus",
@@ -751,7 +843,7 @@
         "h": 4,
         "w": 4,
         "x": 20,
-        "y": 38
+        "y": 46
       },
       "targets": [
         {
@@ -772,7 +864,7 @@
     },
     {
       "type": "gauge",
-      "id": 22,
+      "id": 24,
       "title": "오늘 OpenDART 호출",
       "datasource": {
         "type": "prometheus",
@@ -782,7 +874,7 @@
         "h": 4,
         "w": 12,
         "x": 12,
-        "y": 42
+        "y": 50
       },
       "targets": [
         {

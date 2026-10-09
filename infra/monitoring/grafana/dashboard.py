@@ -202,6 +202,32 @@ panel(
     stack=True,
 )
 next_row()
+panel(
+    "timeseries",
+    "LLM 요청: 답한 모델 (시간당)",
+    [
+        (
+            "sum by (model, outcome) (increase(dartrag_llm_requests_total[1h]))",
+            "{{model}} {{outcome}}",
+        )
+    ],
+    0,
+    12,
+    stack=True,
+    desc="ok: 기본 모델이 답함, fallback: 기본 모델이 실패하거나 첫 글자가 늦어 대체 모델이 답함, "
+    "error: 모두 실패",
+)
+panel(
+    "timeseries",
+    "LLM 실패한 시도 (시간당)",
+    [("sum by (model, kind) (increase(dartrag_llm_failures_total[1h]))", "{{model}} {{kind}}")],
+    12,
+    12,
+    stack=True,
+    desc="connect·timeout·server·disconnect 는 다시 보냄, missing: 모델 없음(ollama pull), "
+    "deadline: 게이트웨이 시간 제한",
+)
+next_row()
 
 # --- 평가 ---------------------------------------------------------------------
 row("정기 평가")

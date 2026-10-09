@@ -57,6 +57,20 @@ LLM_TOKENS = Counter(
     ["model", "kind"],
     registry=REGISTRY,
 )
+LLM_REQUESTS = Counter(
+    "dartrag_llm_requests",
+    "LLM 게이트웨이 요청 결과. model 은 실제로 답한 모델 "
+    "(outcome: ok 기본 모델, fallback 대체 모델, error 실패. error 의 model 은 기본 모델)",
+    ["model", "outcome"],
+    registry=REGISTRY,
+)
+LLM_FAILURES = Counter(
+    "dartrag_llm_failures",
+    "실패한 LLM 요청 시도 (kind: connect, timeout, server, disconnect 는 다시 보냄, "
+    "missing 모델 없음, deadline 게이트웨이 시간 제한, error 그 밖)",
+    ["model", "kind"],
+    registry=REGISTRY,
+)
 FEEDBACK = Counter(
     "dartrag_feedback",
     "답변 평가 (up, down)",
