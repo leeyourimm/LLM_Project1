@@ -3,6 +3,7 @@
 import json
 import time
 from collections.abc import Callable, Iterator
+from datetime import date
 from typing import Annotated, Literal
 
 from fastapi import APIRouter, HTTPException, Path
@@ -10,6 +11,8 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
 from dartrag.answer.conversation import Resolved, TurnContext, resolve
+from dartrag.answer.evidence import passage, quoted
+from dartrag.answer.trust import assess
 from dartrag.obs import metrics
 from dartrag.search import SearchFilter
 
@@ -33,6 +36,7 @@ class FeedbackRequest(BaseModel):
 
 def source_dict(number: int | None, hit) -> dict:
     c = hit.chunk
+    rcept_dt = c.get("rcept_dt")
     return {
         "number": number,
         "chunk_id": hit.chunk_id,
@@ -43,14 +47,24 @@ def source_dict(number: int | None, hit) -> dict:
         "body": c.get("body", ""),
         "unit": c.get("unit"),
         "url": c.get("url"),
+        "rcept_no": c.get("rcept_no"),
+        # 대화 기록(JSONB)에 그대로 저장되므로 날짜는 문자열로
+        "rcept_dt": rcept_dt.isoformat() if isinstance(rcept_dt, date) else rcept_dt,
+        # 출처 패널: 모델이 읽은 앞뒤 문단(context)과 그 안의 인용 문단 위치(highlight)
+        **passage(hit),
     }
 
 
-def _sources(hits, cited: set[int] | None = None) -> list[dict]:
-    return [
-        source_dict(i, h) | ({"cited": i in cited} if cited is not None else {})
-        for i, h in enumerate(hits, start=1)
-    ]
+def _sources(hits, cited: set[int] | None = None, quotes: dict | None = None) -> list[dict]:
+    out = []
+    for i, h in enumerate(hits, start=1):
+        d = source_dict(i, h)
+        if cited is not None:
+            d["cited"] = i in cited
+            # 답변에 옮긴 숫자가 원문(context 또는 body)에서 있는 위치
+            d["quoted"] = (quotes or {}).get(i, [])
+        out.append(d)
+    return out
 
 
 def _sse(event: str, data: dict) -> str:
@@ -104,7 +118,9 @@ def build_router(  # noqa: N803
             "cached": result.cached,
             "warnings": result.warnings,
             "unverified_numbers": result.unverified,
-            "sources": _sources(result.hits, cited),
+            # 답변 신뢰도 표시: 근거 수, 최신 공시 여부, 검증 결과 (답변 시점 기준으로 저장)
+            "trust": assess(result, repo.filing_freshness, date.today()),
+            "sources": _sources(result.hits, cited, quoted(result)),
             "model": model,
             "elapsed_ms": int((time.monotonic() - started) * 1000),
         }
@@ -133,7 +149,8 @@ def build_router(  # noqa: N803
                 )
             except LLMError as e:
                 raise HTTPException(503, str(e)) from None
-            return finish(repo, conv_id, resolved, result, answerer.llm.name, started)
+            model = result.model or answerer.llm.name
+            return finish(repo, conv_id, resolved, result, model, started)
 
     @router.post("/api/ask/stream", dependencies=[rate("ask")])
     def ask_stream(req: AskRequest, user: CurrentUser = None):
@@ -166,9 +183,8 @@ def build_router(  # noqa: N803
                         elif kind == "token":
                             yield _sse("token", {"text": value})
                         else:
-                            done = finish(
-                                repo, conv_id, resolved, value, answerer.llm.name, started
-                            )
+                            model = value.model or answerer.llm.name
+                            done = finish(repo, conv_id, resolved, value, model, started)
                             yield _sse("done", done)
                 except LLMError as e:
                     yield _sse("error", {"detail": str(e)})

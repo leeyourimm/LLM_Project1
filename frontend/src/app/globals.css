@@ -16,6 +16,10 @@
   --warning-soft: #fff5e5;
   --critical: #c42b1c;
   --critical-soft: #fdecea;
+  --good-soft: #e6f4ee;
+  /* 출처 패널: 답변이 인용한 문단, 그 안에서 답변에 옮긴 숫자 */
+  --highlight: #fff0b3;
+  --highlight-strong: #ffd84d;
   --series-1: #2a78d6;
   --series-2: #eb6834;
   --series-3: #1baf7a;
@@ -39,6 +43,9 @@
     --warning-soft: #3a2a12;
     --critical: #ff7b6e;
     --critical-soft: #3d1d1b;
+    --good-soft: #12301f;
+    --highlight: #4a3f14;
+    --highlight-strong: #7a6516;
     --series-1: #3987e5;
     --series-2: #d95926;
     --series-3: #199e70;
@@ -62,6 +69,9 @@
   --warning-soft: #3a2a12;
   --critical: #ff7b6e;
   --critical-soft: #3d1d1b;
+  --good-soft: #12301f;
+  --highlight: #4a3f14;
+  --highlight-strong: #7a6516;
   --series-1: #3987e5;
   --series-2: #d95926;
   --series-3: #199e70;
@@ -84,6 +94,9 @@
   --color-warning-soft: var(--warning-soft);
   --color-critical: var(--critical);
   --color-critical-soft: var(--critical-soft);
+  --color-good-soft: var(--good-soft);
+  --color-highlight: var(--highlight);
+  --color-highlight-strong: var(--highlight-strong);
   --font-sans: "Pretendard", "Apple SD Gothic Neo", "Noto Sans KR", system-ui, sans-serif;
 }
 
@@ -102,6 +115,25 @@ body {
 :focus-visible {
   outline: 2px solid var(--accent);
   outline-offset: 2px;
+}
+
+/* 답변의 [n] 을 눌러 연 출처: 인용 문단을 잠깐 강조해서 눈이 따라가게 한다 */
+@keyframes cite-flash {
+  0%,
+  100% {
+    box-shadow: 0 0 0 0 transparent;
+  }
+  30% {
+    box-shadow: 0 0 0 3px var(--highlight-strong);
+  }
+}
+.cite-flash {
+  animation: cite-flash 1.2s ease-in-out 1;
+}
+@media (prefers-reduced-motion: reduce) {
+  .cite-flash {
+    animation: none;
+  }
 }
 
 @layer components {

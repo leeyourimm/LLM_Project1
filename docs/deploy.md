@@ -72,6 +72,12 @@ sudo systemctl restart ollama
 ollama pull qwen3:8b
 ```
 
+(선택) 기본 모델이 실패하거나 첫 글자가 늦을 때 대신 답할 작은 모델도 받아 두려면 아래를 실행하고, 3단계에서 `.env`의 `LLM_FALLBACK_MODEL=qwen3:1.7b`를 채웁니다. 동작과 지표는 README의 "답변 모델 재시도와 대체 모델"에 있습니다.
+
+```bash
+ollama pull qwen3:1.7b
+```
+
 컨테이너로 띄우고 싶다면 이 단계를 건너뛰고 "Ollama를 컨테이너로" 절을 보세요.
 
 ## 3. 코드 받기와 설정

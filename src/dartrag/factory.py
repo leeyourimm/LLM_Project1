@@ -79,12 +79,15 @@ def build_retriever(backends: Backends, repo: Repository):
     )
 
 
-def build_answerer(backends: Backends, repo: Repository, *, use_cache: bool = True):
-    from dartrag.answer import Answerer, OllamaLLM
+def build_answerer(
+    backends: Backends, repo: Repository, *, use_cache: bool = True, use_fallback: bool = True
+):
+    """use_fallback=False: 대체 모델을 쓰지 않는다 (평가는 기본 모델의 답만 재야 한다)."""
+    from dartrag.answer import Answerer
     from dartrag.finance import FinanceTool
 
     s = backends.settings
-    llm = OllamaLLM(s.llm_model, s.ollama_url)
+    llm = build_llm(s, fallback=use_fallback)
     cache = None
     if use_cache and s.answer_cache and backends.redis is not None:
         from dartrag.answer.cache import AnswerCache
@@ -108,10 +111,29 @@ def build_answerer(backends: Backends, repo: Repository, *, use_cache: bool = Tr
     )
 
 
-def build_llm(settings: Settings):
-    from dartrag.answer import OllamaLLM
+def build_llm(settings: Settings, *, fallback: bool = True):
+    """답변 모델(Ollama)을 게이트웨이로 감싼다: 시간 제한, 일시적 오류 재시도, 대체 모델."""
+    import httpx
 
-    return OllamaLLM(settings.llm_model, settings.ollama_url)
+    from dartrag.answer import OllamaLLM
+    from dartrag.answer.gateway import LLMGateway
+
+    s = settings
+    # 시간 제한은 게이트웨이가 잰다. httpx 의 읽기 제한은 그보다 조금 길게 두어
+    # 게이트웨이가 포기한 요청의 연결을 정리하는 데만 쓴다
+    read = s.llm_timeout + 30 if s.llm_timeout else None
+    http_timeout = httpx.Timeout(read, connect=10)
+    primary = OllamaLLM(s.llm_model, s.ollama_url, timeout=http_timeout)
+    backup = s.llm_fallback_model.strip()
+    use_backup = fallback and backup and backup != s.llm_model
+    return LLMGateway(
+        primary,
+        OllamaLLM(backup, s.ollama_url, timeout=http_timeout) if use_backup else None,
+        timeout=s.llm_timeout,
+        first_token_timeout=s.llm_first_token_timeout,
+        retries=s.llm_retries,
+        backoff=s.llm_retry_backoff,
+    )
 
 
 def build_senders(settings: Settings) -> dict:

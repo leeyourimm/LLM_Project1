@@ -57,6 +57,20 @@ LLM_TOKENS = Counter(
     ["model", "kind"],
     registry=REGISTRY,
 )
+LLM_REQUESTS = Counter(
+    "dartrag_llm_requests",
+    "LLM 게이트웨이 요청 결과. model 은 실제로 답한 모델 "
+    "(outcome: ok 기본 모델, fallback 대체 모델, error 실패. error 의 model 은 기본 모델)",
+    ["model", "outcome"],
+    registry=REGISTRY,
+)
+LLM_FAILURES = Counter(
+    "dartrag_llm_failures",
+    "실패한 LLM 요청 시도 (kind: connect, timeout, server, disconnect 는 다시 보냄, "
+    "missing 모델 없음, deadline 게이트웨이 시간 제한, error 그 밖)",
+    ["model", "kind"],
+    registry=REGISTRY,
+)
 FEEDBACK = Counter(
     "dartrag_feedback",
     "답변 평가 (up, down)",
@@ -67,6 +81,19 @@ RATE_LIMITED = Counter(
     "dartrag_rate_limited",
     "요청 한도에 걸린 수",
     ["scope"],
+    registry=REGISTRY,
+)
+DASHBOARD_CACHE = Counter(
+    "dartrag_dashboard_cache",
+    "기업 대시보드 캐시 조회 (view: company, quarters / result: hit, miss, error)",
+    ["view", "result"],
+    registry=REGISTRY,
+)
+DASHBOARD_BUILD_SECONDS = Histogram(
+    "dartrag_dashboard_build_seconds",
+    "캐시에 없어서 요청 중에 대시보드를 만든 시간",
+    ["view"],
+    buckets=SLOW_BUCKETS,
     registry=REGISTRY,
 )
 

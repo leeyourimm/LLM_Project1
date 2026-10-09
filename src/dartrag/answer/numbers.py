@@ -10,7 +10,7 @@
 """
 
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from decimal import Decimal
 
 _MULTIPLIERS = {
@@ -45,6 +45,9 @@ class Quantity:
     value: Decimal  # 원 단위 금액이면 원, 비율이면 %, 그 외는 적힌 값
     tol: Decimal  # 적힌 자릿수에 따른 반올림 허용 오차
     kind: str  # money / percent / plain
+    # 원문 안 위치 (화면에서 답변이 옮긴 숫자를 표시할 때 쓴다). 비교에는 쓰지 않는다
+    start: int = field(default=-1, compare=False)
+    end: int = field(default=-1, compare=False)
 
 
 def _parse(match: re.Match, table_unit: tuple[Decimal, str] | None = None) -> Quantity:
@@ -52,19 +55,26 @@ def _parse(match: re.Match, table_unit: tuple[Decimal, str] | None = None) -> Qu
     step = Decimal(1).scaleb(-len(match["frac"] or ""))
     mult = _MULTIPLIERS.get(match["mult"] or "", Decimal(1))
     unit = match["unit"]
+    text = match.group(0).strip()
+    pos = {"start": match.start(), "end": match.start() + len(match.group(0).rstrip())}
     if unit in ("%", "퍼센트", "%p"):
-        return Quantity(match.group(0).strip(), raw, step / 2, "percent")
+        return Quantity(text, raw, step / 2, "percent", **pos)
     if unit == "원" or match["mult"]:
-        return Quantity(match.group(0).strip(), raw * mult, step * mult / 2, "money")
+        return Quantity(text, raw * mult, step * mult / 2, "money", **pos)
     if table_unit and unit is None:
         t_mult, t_kind = table_unit
-        return Quantity(match.group(0).strip(), raw * t_mult, step * t_mult / 2, t_kind)
-    return Quantity(match.group(0).strip(), raw, step / 2, "plain")
+        return Quantity(text, raw * t_mult, step * t_mult / 2, t_kind, **pos)
+    return Quantity(text, raw, step / 2, "plain", **pos)
+
+
+def _blank(m: re.Match) -> str:
+    # 같은 길이의 공백으로 지워야 남은 숫자의 위치가 원문과 같다
+    return " " * len(m.group(0))
 
 
 def extract(text: str, table_unit: str | None = None) -> list[Quantity]:
     """텍스트에서 수량을 뽑는다. '1조 2,345억원' 같은 복합 표기는 하나로 합친다."""
-    text = _DATE_RE.sub(" ", _CITATION_RE.sub(" ", text))
+    text = _DATE_RE.sub(_blank, _CITATION_RE.sub(_blank, text))
     unit = parse_unit(table_unit)
     out: list[Quantity] = []
     prev_end, prev_mult = -1, None
@@ -80,7 +90,9 @@ def extract(text: str, table_unit: str | None = None) -> list[Quantity]:
         )
         if merge:
             last = out.pop()
-            q = Quantity(f"{last.text} {q.text}", last.value + q.value, q.tol, "money")
+            q = Quantity(
+                f"{last.text} {q.text}", last.value + q.value, q.tol, "money", last.start, q.end
+            )
         out.append(q)
         # 단위 없이 끝난 금액(예: '1조 2,345억' 뒤 '원')만 다음 숫자와 합칠 수 있다
         prev_end, prev_mult = m.end(), (mult if m["mult"] and not m["unit"] else None)
@@ -131,3 +143,26 @@ def unverified_numbers(sentence: str, sources: list[tuple[str, str | None]]) -> 
     return [
         q.text for q in extract(sentence) if _checkable(q) and not any(matches(q, s) for s in found)
     ]
+
+
+def quoted_spans(sentences: list[str], text: str, unit: str | None = None) -> list[tuple[int, int]]:
+    """답변 문장들에 쓴 숫자가 원문 text 의 어디에 있는지 (시작, 끝) 위치.
+
+    검사 규칙은 unverified_numbers 와 같다. 화면에서 답변이 옮긴 숫자를 원문에 표시하는 데 쓴다."""
+    wanted = [q for s in sentences for q in extract(s) if _checkable(q)]
+    if not wanted:
+        return []
+    candidates = extract(text) + (extract(text, unit) if unit else [])
+    spans = {(s.start, s.end) for s in candidates if any(matches(q, s) for q in wanted)}
+    merged: list[tuple[int, int]] = []
+    for start, end in sorted(spans):
+        if merged and start <= merged[-1][1]:
+            merged[-1] = (merged[-1][0], max(merged[-1][1], end))
+        else:
+            merged.append((start, end))
+    return merged
+
+
+def checked_count(sentence: str) -> int:
+    """문장에서 원문과 대조하는 숫자 개수 (연도·작은 정수 제외)."""
+    return sum(1 for q in extract(sentence) if _checkable(q))

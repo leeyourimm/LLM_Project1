@@ -139,18 +139,56 @@ def check_embedding_package(find_spec: Callable = importlib.util.find_spec) -> C
     return Check("임베딩 라이브러리", True, "설치됨")
 
 
+def _ollama_models(settings: Settings, http: httpx.Client) -> set[str]:
+    resp = http.get(f"{settings.ollama_url}/api/tags", timeout=5)
+    resp.raise_for_status()
+    return {m.get("name", "") for m in resp.json().get("models", [])}
+
+
+def _has_model(models: set[str], wanted: str) -> bool:
+    return wanted in models or f"{wanted}:latest" in models
+
+
 def check_ollama(settings: Settings, http: httpx.Client) -> Check:
     name = "Ollama (답변 모델)"
     try:
-        resp = http.get(f"{settings.ollama_url}/api/tags", timeout=5)
-        resp.raise_for_status()
-        models = {m.get("name", "") for m in resp.json().get("models", [])}
+        models = _ollama_models(settings, http)
     except (httpx.HTTPError, ValueError) as e:
         return Check(name, False, f"연결 실패 ({type(e).__name__})", "Ollama 앱을 실행하세요")
     wanted = settings.llm_model
-    if wanted not in models and f"{wanted}:latest" not in models:
+    if not _has_model(models, wanted):
         return Check(name, False, f"{wanted} 모델이 없습니다", f"ollama pull {wanted}")
     return Check(name, True, f"{wanted} 준비됨")
+
+
+def check_llm_fallback(settings: Settings, http: httpx.Client) -> Check:
+    """대체 모델(LLM_FALLBACK_MODEL). 없어도 답변은 되므로 경고로만 보여 준다."""
+    name = "Ollama 대체 모델 (기본 모델이 실패하거나 느릴 때)"
+    wanted = settings.llm_fallback_model.strip()
+    if not wanted:
+        return Check(name, True, "사용 안 함 (LLM_FALLBACK_MODEL 비어 있음)", required=False)
+    if wanted == settings.llm_model:
+        return Check(
+            name,
+            False,
+            "기본 모델(LLM_MODEL)과 같아 쓰지 않습니다",
+            ".env 의 LLM_FALLBACK_MODEL 에 더 작은 모델을 넣거나 비우세요",
+            required=False,
+        )
+    try:
+        models = _ollama_models(settings, http)
+    except (httpx.HTTPError, ValueError) as e:
+        return Check(name, False, f"연결 실패 ({type(e).__name__})", required=False)
+    if not _has_model(models, wanted):
+        return Check(
+            name, False, f"{wanted} 모델이 없습니다", f"ollama pull {wanted}", required=False
+        )
+    return Check(
+        name,
+        True,
+        f"{wanted} 준비됨 (첫 글자 {settings.llm_first_token_timeout:g}초 넘으면 넘김)",
+        required=False,
+    )
 
 
 def check_disk(path: Path = Path("."), min_free_gb: int = MIN_FREE_GB, usage=shutil.disk_usage):
@@ -311,6 +349,7 @@ def run_checks(settings: Settings, http: httpx.Client | None = None, *, online: 
             check_redis(settings),
             check_embedding_package(),
             check_ollama(settings, http),
+            check_llm_fallback(settings, http),
             check_alerts(settings),
             check_account_mail(settings),
             check_security(settings),

@@ -7,7 +7,7 @@ import hmac
 import logging
 import pathlib
 import time
-from dataclasses import asdict, dataclass
+from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
 from typing import Annotated
 from urllib.parse import urlsplit
@@ -696,37 +696,14 @@ def create_app(services: Services, limiter: auth.LoginLimiter | None = None) -> 
         days: Annotated[int, Query(ge=1, le=365)] = 90,
         user: CurrentUser = None,
     ):
-        from dartrag.finance.series import company_series
-
+        """기업 대시보드. 사용자와 관계없는 부분은 미리 만들어 둔 것을 쓴다 (dartrag.dashboard)."""
         with services.repo() as repo:
             found = repo.company_by_stock(stock)
             if found is None:
                 raise HTTPException(404, "해당 종목코드의 기업이 없습니다")
-            code, name, stock_code = found
-            series = company_series(repo, code, years)
-            disclosures = repo.recent_disclosures(date.today() - timedelta(days=days), 1, [code])
-            watched = any(c == code for c, *_ in repo.watchlist(uid(user)))
-            issues = repo.data_issues(code)
-        return {
-            "corp_code": code,
-            "corp_name": name,
-            "stock_code": stock_code,
-            "watched": watched,
-            "series": [asdict(p) for p in series],
-            "disclosures": [
-                d | {"url": f"https://dart.fss.or.kr/dsaf001/main.do?rcpNo={d['rcept_no']}"}
-                for d in disclosures[:30]
-            ],
-            # 재무 데이터 검증에 걸린 항목: 화면에 "확인 필요"로 보여 준다
-            "issues": [
-                {
-                    k: i[k]
-                    for k in ("bsns_year", "reprt_code", "fs_div", "rule", "severity", "detail")
-                }
-                for i in issues
-            ],
-            "disclaimer": DISCLAIMER,
-        }
+            body = services.dashboards.company(repo, tuple(found), years, days)
+            watched = any(c == found[0] for c, *_ in repo.watchlist(uid(user)))
+        return body | {"watched": watched, "disclaimer": DISCLAIMER}
 
     api.include_router(build_router(services, CurrentUser, corp_codes, rate))
     api.include_router(build_insights_router(services, rate))

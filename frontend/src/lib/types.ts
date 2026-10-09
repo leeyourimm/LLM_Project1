@@ -16,6 +16,9 @@ export interface AuthInfo {
   user: { email: string; email_verified?: boolean } | null;
 }
 
+// 위치([시작, 끝))는 백엔드(파이썬) 문자열 기준이라 유니코드 코드 포인트 단위다 (lib/passage.ts)
+export type Span = [number, number];
+
 export interface Source {
   number: number | null;
   chunk_id: string;
@@ -27,6 +30,38 @@ export interface Source {
   unit: string | null;
   url: string | null;
   cited?: boolean;
+  rcept_no?: string | null;
+  rcept_dt?: string | null;
+  // 모델이 읽은 앞뒤 문단을 포함한 원문과, 그 안에서 인용한 문단(body)의 위치. 없으면 body 전체가 인용 문단
+  context?: string | null;
+  highlight?: Span | null;
+  // 답변에 옮긴 숫자가 원문(context 또는 body)에서 있는 위치 (답변이 끝난 뒤에만)
+  quoted?: Span[];
+}
+
+export interface FilingRef {
+  rcept_no: string;
+  report_nm: string | null;
+  rcept_dt: string | null;
+}
+
+// 답변 신뢰도: 점수가 아니라 서비스가 확인한 사실 (src/dartrag/answer/trust.py)
+export interface Trust {
+  sources: number; // 답변이 인용한 서로 다른 출처 수
+  filings: number; // 그 출처들이 나온 서로 다른 공시 수
+  numbers_checked: number; // 인용한 원문과 대조한 숫자 수
+  unverified_numbers: string[];
+  invalid_citations: number[];
+  uncited: boolean;
+  newest: (FilingRef & { corp_name: string | null; age_days: number }) | null;
+  companies: {
+    corp_code: string;
+    corp_name: string;
+    cited: FilingRef;
+    latest: (FilingRef & { indexed: boolean }) | null;
+    is_latest: boolean | null; // null: 비교할 정기공시를 모름
+  }[];
+  checked_on: string;
 }
 
 export interface AnswerDone {
@@ -40,6 +75,7 @@ export interface AnswerDone {
   cached: boolean;
   warnings: string[];
   unverified_numbers: string[];
+  trust: Trust | null;
   sources: Source[];
   model: string;
   elapsed_ms: number;

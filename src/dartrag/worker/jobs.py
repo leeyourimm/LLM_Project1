@@ -175,6 +175,20 @@ def process(ctx: Context, repo, corp_codes: list[str] | None = None, limit: int 
     }
 
 
+def warm_dashboards(ctx: Context, repo, corp_codes: list[str] | None = None):
+    """기업 대시보드를 미리 만들어 Redis 에 넣는다. corp_codes 가 없으면 관심 종목 회사 전부.
+
+    API 서버와 같은 Redis 에 넣어야 화면이 바로 쓰므로 Redis 가 없으면 하지 않는다.
+    회사 데이터 버전과 날짜가 그대로인 회사는 다시 만들지 않는다."""
+    from dartrag.dashboard import DashboardCache, warm_companies
+
+    if ctx.redis is None:
+        return {"skipped": "redis_url 이 없어 미리 만들 곳이 없음"}
+    companies = repo.companies_by_code(corp_codes) if corp_codes else repo.watched_companies()
+    cache = DashboardCache(ctx.redis, ttl=ctx.settings.dashboard_cache_ttl)
+    return {"companies": len(companies)} | warm_companies(cache, repo, companies)
+
+
 def send_alerts(ctx: Context, repo):
     from dartrag.factory import build_notifiers, build_senders
     from dartrag.feed.alerts import send_user_alerts, unsubscribe_link
@@ -272,7 +286,7 @@ def evaluate(ctx: Context, repo, limit: int | None = None, eval_dir: str = "eval
         "cases": len(cases),
         "files": f"scheduled (seed {seed})",
     }
-    answerer = build_answerer(ctx.backends, repo, use_cache=False)
+    answerer = build_answerer(ctx.backends, repo, use_cache=False, use_fallback=False)
     result = run_and_record(repo, answerer, cases, Path("reports/eval"), meta)
     return {
         "cases": len(cases),

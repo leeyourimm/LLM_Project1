@@ -27,12 +27,22 @@ class Settings(BaseSettings):
 
     ollama_url: str = "http://localhost:11434"
     llm_model: str = "qwen3:8b"
+    # LLM 게이트웨이 (answer/gateway.py): 시간 제한, 일시적 오류 재시도, 대체 모델
+    # 대체 모델은 LLM_FALLBACK_MODEL 을 넣을 때만 쓴다 (예: 더 작은 qwen3:1.7b, 미리 ollama pull)
+    llm_fallback_model: str = ""
+    llm_timeout: float = 300  # 요청 하나가 끝날 때까지 기다리는 최대 시간(초). 0 이면 제한 없음
+    # 대체 모델이 있을 때만: 기본 모델이 이 시간(초) 안에 첫 글자를 못 내면 대체 모델로 넘긴다
+    llm_first_token_timeout: float = 30
+    llm_retries: int = 2  # 연결 실패·5xx 같은 일시적 오류에 다시 보낼 횟수
+    llm_retry_backoff: float = 0.5  # 첫 재시도 전 기다리는 시간(초). 다시 할 때마다 두 배
 
     # 답변 캐시 (Redis). redis_url 을 비우면 캐시 없이 동작
     redis_url: str = "redis://localhost:6379/0"
     answer_cache: bool = True
     semantic_cache: bool = True
     answer_cache_ttl: int = 7 * 86400
+    # 기업 대시보드 캐시 보관 시간(초). 회사 데이터가 바뀌면 이보다 먼저 새로 만든다
+    dashboard_cache_ttl: int = 6 * 3600
 
     # 공시 알림 웹훅 (Slack·Discord). 비워 두면 터미널에만 출력
     alert_webhook_url: str = ""
@@ -76,6 +86,8 @@ class Settings(BaseSettings):
     feed_poll_minutes: int = 10
     ingest_minutes: int = 5
     alerts_minutes: int = 5
+    # 관심 종목 회사의 대시보드를 미리 만드는 주기 (바뀐 회사만 다시 만든다)
+    dashboard_warm_minutes: int = 15
     backfill_enabled: bool = False  # 전체 상장사 과거 데이터 채우기 (며칠 걸림)
     backfill_start_year: int = 2015
     backfill_batch: int = 20  # 한 번에 처리할 회사 수

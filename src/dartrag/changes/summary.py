@@ -9,6 +9,7 @@
 import re
 from dataclasses import asdict, dataclass, field
 
+from dartrag.answer.gateway import answered_by
 from dartrag.answer.llm import LLM, Message
 from dartrag.answer.numbers import unverified_numbers
 from dartrag.answer.prompt import neutralize_tags
@@ -223,6 +224,7 @@ def summarize(comparison: Comparison, llm: LLM | None, *, series=None) -> DiffDi
             digest.metrics = metric_changes(series, old_y, new_y)
     if llm is not None and items:
         text = llm.chat(build_messages(digest.corp_name, comparison, items))
+        digest.model = answered_by(llm)  # 대체 모델이 답했으면 그 이름
         digest.points, digest.dropped = parse_summary(text, items)
     return digest
 
@@ -276,5 +278,6 @@ def latest_digest(
             return DiffDigest.from_dict(saved["payload"])
     comparison = compare_filings(repo, *pair)
     digest = summarize(comparison, llm, series=company_series(repo, corp_code, 10))
-    repo.save_diff_summary(*pair, SUMMARY_VERSION, model, digest.to_dict())
+    # 실제로 답한 모델로 저장한다. 대체 모델이 만든 요약은 기본 모델이 돌아오면 다시 만든다
+    repo.save_diff_summary(*pair, SUMMARY_VERSION, digest.model, digest.to_dict())
     return digest
