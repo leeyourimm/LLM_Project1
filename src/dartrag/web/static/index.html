@@ -1,0 +1,79 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>DART 공시 분석</title>
+  <link rel="stylesheet" href="/static/app.css">
+</head>
+<body>
+  <header class="top">
+    <div class="brand">DART 공시 분석</div>
+    <nav class="tabs" role="tablist">
+      <button role="tab" data-tab="ask" aria-selected="true">질문하기</button>
+      <button role="tab" data-tab="feed">공시 피드</button>
+      <button role="tab" data-tab="watch">관심 종목</button>
+      <button role="tab" data-tab="diff">변경점</button>
+    </nav>
+  </header>
+
+  <main>
+    <section id="tab-ask" class="panel">
+      <form id="ask-form" class="card">
+        <label for="ask-q">무엇이 궁금하세요?</label>
+        <textarea id="ask-q" rows="2" maxlength="500" required
+          placeholder="예: 삼성전자 2024년 매출 증가율과 영업이익률은?"></textarea>
+        <div class="row">
+          <input id="ask-stock" list="company-list" placeholder="회사 (선택)" autocomplete="off">
+          <input id="ask-from" type="number" min="2000" max="2100" placeholder="시작 연도">
+          <input id="ask-to" type="number" min="2000" max="2100" placeholder="끝 연도">
+          <button type="submit" class="primary">질문</button>
+        </div>
+      </form>
+      <div id="ask-result" aria-live="polite"></div>
+    </section>
+
+    <section id="tab-feed" class="panel" hidden>
+      <div class="card row">
+        <select id="feed-days">
+          <option value="1">오늘</option><option value="7" selected>최근 7일</option>
+          <option value="30">최근 30일</option>
+        </select>
+        <select id="feed-imp">
+          <option value="3">🔴 중요한 것만</option><option value="2" selected>🟠 이상</option>
+          <option value="1">전체</option>
+        </select>
+        <label class="check"><input id="feed-watched" type="checkbox"> 관심 종목만</label>
+        <button id="feed-refresh">새로고침</button>
+      </div>
+      <ul id="feed-list" class="list"></ul>
+    </section>
+
+    <section id="tab-watch" class="panel" hidden>
+      <form id="watch-form" class="card row">
+        <input id="watch-stock" list="company-list" placeholder="회사 이름 또는 종목코드" required autocomplete="off">
+        <select id="watch-imp">
+          <option value="3">🔴 중요한 공시만</option><option value="2" selected>🟠 이상 알림</option>
+          <option value="1">모든 공시</option>
+        </select>
+        <button type="submit" class="primary">추가</button>
+      </form>
+      <ul id="watch-list" class="list"></ul>
+      <p class="hint">알림은 <code>dartrag feed poll --every 600</code> 이 켜져 있을 때 보내집니다.</p>
+    </section>
+
+    <section id="tab-diff" class="panel" hidden>
+      <form id="diff-form" class="card row">
+        <input id="diff-stock" list="company-list" placeholder="회사" required autocomplete="off">
+        <button type="submit" class="primary">최근 두 사업보고서 비교</button>
+      </form>
+      <div id="diff-result"></div>
+    </section>
+  </main>
+
+  <datalist id="company-list"></datalist>
+  <footer>공시 정보 요약이며 투자 권유가 아닙니다. 데이터 출처: 금융감독원 OpenDART</footer>
+  <template id="tpl-error"><div class="card error" role="alert"></div></template>
+  <script src="/static/app.js"></script>
+</body>
+</html>

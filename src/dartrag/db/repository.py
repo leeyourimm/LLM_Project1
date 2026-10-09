@@ -259,6 +259,12 @@ class Repository:
         ).fetchall()
         return [(r[0], r[1]) for r in rows]
 
+    def listed_companies_with_stock(self) -> list[tuple[str, str, str]]:
+        return self.conn.execute(
+            """SELECT corp_code, corp_name, stock_code FROM companies
+               WHERE stock_code IS NOT NULL ORDER BY corp_name"""
+        ).fetchall()
+
     def financial_rows(
         self,
         corp_codes: list[str],

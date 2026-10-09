@@ -358,6 +358,23 @@ def watch_list():
         typer.echo(f"{stock or '-'} {name} (중요도 {imp} 이상)")
 
 
+@app.command()
+def serve(host: str = "127.0.0.1", port: int = 8000):
+    """웹 화면과 API 서버 실행 (기본: http://127.0.0.1:8000)."""
+    import uvicorn
+
+    from dartrag.web import create_app, default_services
+
+    logging.basicConfig(level=logging.INFO)
+    logging.getLogger("httpx").setLevel(logging.WARNING)
+    settings = get_settings()
+    repo = Repository.connect(settings.database_url)
+    repo.migrate()
+    repo.conn.close()
+    typer.echo(f"http://{host}:{port} 에서 열립니다")
+    uvicorn.run(create_app(default_services(settings)), host=host, port=port)
+
+
 eval_app = typer.Typer(help="답변 품질 평가")
 app.add_typer(eval_app, name="eval")
 
