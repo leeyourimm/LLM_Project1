@@ -19,7 +19,7 @@ def repo():
     conn = psycopg.connect(URL)
     conn.execute(
         "DROP TABLE IF EXISTS eval_runs, data_issues, job_runs, backfill_state, diff_summaries, "
-        "user_notifications, user_alert_channels, "
+        "user_notifications, user_alert_channels, auth_tokens, user_devices, "
         "feedback, messages, conversations, sessions, user_watchlist, "
         "users, notifications, watchlist, disclosures, chunks, financial_items, filings, "
         "companies, app_state CASCADE"
@@ -590,6 +590,9 @@ def _seed_user(repo, email: str, rcept_no: str) -> dict:
     repo.start_alert_channel(uid, "telegram", None, "q" * 63 + email[0], later)
     repo.confirm_alert_channel("telegram", "q" * 63 + email[0], target="42")
     repo.mark_user_notified(uid, [rcept_no], "email")
+    repo.create_auth_token(uid, "reset", "r" * 63 + email[0], later)
+    repo.create_auth_token(uid, "verify", "v" * 63 + email[0], later)
+    assert repo.remember_device(uid, "h" * 63 + email[0]) == "first"
     conv = repo.create_conversation(uid, f"{email} 질문")
     repo.add_message(conv, "user", "삼성전자 매출은?", {"context": {}})
     answer = repo.add_message(conv, "assistant", "답 [1]", {"sources": []})
@@ -622,6 +625,8 @@ def test_delete_user_leaves_no_rows(repo):
         "user_alert_channels",
         "user_notifications",
         "conversations",
+        "auth_tokens",
+        "user_devices",
     }
     # 사용자를 가리키는 외래 키는 모두 ON DELETE CASCADE (직접 지우기를 빠뜨려도 남지 않게)
     rules = repo.conn.execute(
@@ -638,12 +643,14 @@ def test_delete_user_leaves_no_rows(repo):
         "telegram": "42",
     }
     assert exported["notifications"][0]["rcept_no"] == "20250311000001"
+    assert len(exported["devices"]) == 1 and exported["account"]["email_verified_at"] is None
     [conv] = exported["conversations"]
     assert [m["role"] for m in conv["messages"]] == ["user", "assistant"]
     assert conv["messages"][1]["feedback"]["comment"] == "숫자가 달라요"
     assert conv["messages"][0]["feedback"] is None
     flat = repr(exported)
     assert "secret-hash" not in flat and "pppp" not in flat and "c@d.co" not in flat
+    assert "rrrr" not in flat and "vvvv" not in flat and "hhhh" not in flat
 
     assert repo.delete_user(a["uid"]) and not repo.delete_user(a["uid"])
     assert repo.export_user(a["uid"]) is None
@@ -662,3 +669,73 @@ def test_delete_user_leaves_no_rows(repo):
     for table, _ in refs:
         assert _count(repo, table) == 0, table
     assert _count(repo, "messages") == 0 and _count(repo, "feedback") == 0
+
+
+def test_auth_tokens_devices_and_email_verification(repo):
+    from datetime import UTC, datetime, timedelta
+
+    uid = repo.create_user("a@b.co", "scrypt$old")
+    later = datetime.now(UTC) + timedelta(minutes=30)
+    assert repo.email_verified(uid) is False
+
+    # 한 번만 쓰고, 용도가 다르면 쓸 수 없다
+    repo.create_auth_token(uid, "verify", "v" * 64, later)
+    assert repo.consume_auth_token("reset", "v" * 64) is None
+    assert repo.consume_auth_token("verify", "v" * 64) == (uid, "a@b.co")
+    assert repo.consume_auth_token("verify", "v" * 64) is None
+    repo.mark_email_verified(uid)
+    assert repo.email_verified(uid) is True
+
+    # 새 링크를 만들면 예전 링크는 지워진다. 만료된 링크는 쓸 수 없고 지워진다
+    repo.create_auth_token(uid, "reset", "1" * 64, later)
+    repo.create_auth_token(uid, "reset", "2" * 64, later)
+    assert repo.consume_auth_token("reset", "1" * 64) is None
+    repo.conn.execute(
+        "UPDATE auth_tokens SET expires_at = now() - interval '1 second' WHERE token_hash = %s",
+        ("2" * 64,),
+    )
+    repo.conn.commit()
+    assert repo.consume_auth_token("reset", "2" * 64) is None
+    assert _count(repo, "auth_tokens") == 0
+
+    # 재설정: 비밀번호를 바꾸고 모든 세션과 남은 재설정 링크를 지운다
+    repo.create_session("s" * 64, uid, later)
+    repo.create_auth_token(uid, "reset", "3" * 64, later)
+    repo.create_auth_token(uid, "verify", "4" * 64, later)
+    assert repo.consume_auth_token("reset", "3" * 64) == (uid, "a@b.co")
+    repo.create_auth_token(uid, "reset", "5" * 64, later)
+    repo.reset_password(uid, "scrypt$new")
+    assert repo.user_by_email("a@b.co")[2] == "scrypt$new"
+    assert repo.session_user("s" * 64) is None
+    assert repo.consume_auth_token("reset", "5" * 64) is None
+    assert repo.consume_auth_token("verify", "4" * 64) == (uid, "a@b.co")
+
+    # 재설정 메일을 받은 사용자는 이메일도 인증된 것으로 본다
+    other = repo.create_user("c@d.co", "scrypt$x")
+    repo.reset_password(other, "scrypt$y")
+    assert repo.email_verified(other) is True
+
+    # 기기 기록
+    assert repo.remember_device(uid, "d" * 64) == "first"
+    assert repo.remember_device(uid, "d" * 64) == "known"
+    assert repo.remember_device(uid, "e" * 64) == "new"
+    assert repo.remember_device(uid, "e" * 64) == "known"
+    # 1년 동안 쓰지 않은 기기는 잊는다
+    repo.conn.execute(
+        "UPDATE user_devices SET last_seen = now() - interval '400 days' WHERE device_hash = %s",
+        ("e" * 64,),
+    )
+    repo.conn.commit()
+    assert repo.remember_device(uid, "e" * 64) == "new"
+
+
+def test_migration_marks_alert_verified_users(repo):
+    from datetime import UTC, datetime, timedelta
+
+    uid = repo.create_user("a@b.co", "scrypt$x")
+    later = datetime.now(UTC) + timedelta(days=1)
+    repo.start_alert_channel(uid, "email", "a@b.co", "p" * 64, later)
+    repo.confirm_alert_channel("email", "p" * 64)
+    assert repo.email_verified(uid) is False
+    repo.migrate()  # 마이그레이션은 여러 번 돌려도 된다
+    assert repo.email_verified(uid) is True

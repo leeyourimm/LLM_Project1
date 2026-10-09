@@ -36,6 +36,9 @@ class FakeRepo:
         self.feedback = {}
         self.closed = False
         self.channels = {}
+        self.verified = set()
+        self.tokens = {}
+        self.devices = {}
 
     def corp_codes_for_stocks(self, stocks):
         return ["00126380"] if "005930" in stocks else []
@@ -92,6 +95,40 @@ class FakeRepo:
     def delete_session(self, token_hash):
         self.sessions.pop(token_hash, None)
 
+    # 계정 메일
+    def email_verified(self, uid):
+        return uid in self.verified
+
+    def mark_email_verified(self, uid):
+        self.verified.add(uid)
+
+    def create_auth_token(self, uid, purpose, token_hash, expires):
+        assert len(token_hash) == 64
+        self.tokens = {
+            h: t for h, t in self.tokens.items() if not (t[0] == uid and t[1] == purpose)
+        }
+        self.tokens[token_hash] = (uid, purpose, expires)
+
+    def consume_auth_token(self, purpose, token_hash):
+        t = self.tokens.get(token_hash)
+        if t is None or t[1] != purpose:
+            return None
+        del self.tokens[token_hash]
+        if t[2] <= datetime.now(UTC):
+            return None
+        return t[0], self.users[t[0]][0]
+
+    def reset_password(self, uid, password_hash):
+        self.set_password(uid, password_hash)
+        self.verified.add(uid)
+        self.tokens = {h: t for h, t in self.tokens.items() if t[:2] != (uid, "reset")}
+
+    def remember_device(self, uid, device_hash):
+        mine = self.devices.setdefault(uid, set())
+        status = "first" if not mine else ("known" if device_hash in mine else "new")
+        mine.add(device_hash)
+        return status
+
     def delete_user(self, uid):
         if self.users.pop(uid, None) is None:
             return False
@@ -99,6 +136,9 @@ class FakeRepo:
         self.watch = {k: v for k, v in self.watch.items() if k[0] != uid}
         self.channels = {k: v for k, v in self.channels.items() if k[0] != uid}
         self.convs = {i: c for i, c in self.convs.items() if c["user_id"] != uid}
+        self.tokens = {h: t for h, t in self.tokens.items() if t[0] != uid}
+        self.devices.pop(uid, None)
+        self.verified.discard(uid)
         return True
 
     def export_user(self, uid):
@@ -509,6 +549,8 @@ def test_local_mode_needs_no_login(ctx):
     assert client.get("/api/auth/me").json() == {
         "auth_required": False,
         "allow_signup": True,
+        "email_enabled": False,
+        "email_verification_required": False,
         "user": None,
     }
     assert client.get("/api/companies").status_code == 200
@@ -535,7 +577,10 @@ def test_signup_login_logout(secure):
     assert PW not in str(repo.users) and "scrypt$" in repo.users[1][1]
     # DB 에는 토큰 원문이 아니라 해시만
     assert client.cookies.get("dartrag_session") not in repo.sessions
-    assert client.get("/api/auth/me").json()["user"] == {"email": "a@b.co"}
+    assert client.get("/api/auth/me").json()["user"] == {
+        "email": "a@b.co",
+        "email_verified": False,
+    }
     assert client.get("/api/companies").status_code == 200
 
     dup = client.post("/api/auth/signup", json={"email": "a@b.co", "password": PW})
@@ -775,7 +820,9 @@ def test_email_alert_verification(alerting):
     assert r["per_user"] and r["available"] == {"email": True, "telegram": True}
     assert client.post("/api/alerts/email").json() == {"ok": True, "sent_to": "a@b.co"}
     assert client.post("/api/alerts/email").status_code == 429  # 연달아 보내지 않는다
-    to, subject, body = senders["email"].sent[0]
+    # 첫 메일은 가입 이메일 인증, 두 번째가 알림 인증
+    assert "/verify-email?token=" in senders["email"].sent[0][2]
+    to, subject, body = senders["email"].sent[-1]
     assert to == "a@b.co" and "인증" in subject
     link = next(w for w in body.split() if w.startswith("https://dart.example/api/alerts/"))
     assert client.get("/api/alerts").json()["channels"][0]["verified"] is False

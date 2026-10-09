@@ -531,6 +531,8 @@ class Repository:
         "DELETE FROM user_notifications WHERE user_id = %s",
         "DELETE FROM user_alert_channels WHERE user_id = %s",
         "DELETE FROM user_watchlist WHERE user_id = %s",
+        "DELETE FROM auth_tokens WHERE user_id = %s",
+        "DELETE FROM user_devices WHERE user_id = %s",
         "DELETE FROM sessions WHERE user_id = %s",
     )
 
@@ -550,14 +552,18 @@ class Repository:
         return cur.rowcount > 0
 
     def export_user(self, user_id: int) -> dict | None:
-        """내 데이터 내려받기용. 비밀번호 해시, 세션, 인증 코드 해시는 넣지 않는다."""
+        """내 데이터 내려받기용. 비밀번호 해시, 세션, 인증 코드·기기 해시는 넣지 않는다."""
 
         def rows(sql: str, params: tuple) -> list[dict]:
             cur = self.conn.execute(sql, params)
             cols = [c.name for c in cur.description]
             return [dict(zip(cols, r, strict=True)) for r in cur.fetchall()]
 
-        found = rows("SELECT email, created_at, last_login_at FROM users WHERE id = %s", (user_id,))
+        found = rows(
+            """SELECT email, email_verified_at, created_at, last_login_at
+               FROM users WHERE id = %s""",
+            (user_id,),
+        )
         if not found:
             return None
         conversations = rows(
@@ -597,6 +603,12 @@ class Repository:
                    WHERE user_id = %s ORDER BY sent_at, rcept_no""",
                 (user_id,),
             ),
+            # 기기 기록은 해시뿐이라 언제 처음·마지막으로 썼는지만 넣는다
+            "devices": rows(
+                """SELECT first_seen, last_seen FROM user_devices
+                   WHERE user_id = %s ORDER BY first_seen""",
+                (user_id,),
+            ),
             "conversations": [c | {"messages": by_conv.get(c["id"], [])} for c in conversations],
         }
 
@@ -619,6 +631,85 @@ class Repository:
     def delete_session(self, token_hash: str) -> None:
         self.conn.execute("DELETE FROM sessions WHERE token_hash = %s", (token_hash,))
         self.conn.commit()
+
+    # --- 계정 메일 (이메일 인증, 비밀번호 재설정, 새 기기 알림) --------------
+
+    def email_verified(self, user_id: int) -> bool:
+        row = self.conn.execute(
+            "SELECT email_verified_at IS NOT NULL FROM users WHERE id = %s", (user_id,)
+        ).fetchone()
+        return bool(row and row[0])
+
+    def mark_email_verified(self, user_id: int) -> None:
+        self.conn.execute(
+            """UPDATE users SET email_verified_at = now()
+               WHERE id = %s AND email_verified_at IS NULL""",
+            (user_id,),
+        )
+        self.conn.commit()
+
+    def create_auth_token(self, user_id: int, purpose: str, token_hash: str, expires_at) -> None:
+        """메일 링크용 토큰. 같은 용도의 예전 링크는 지워서 마지막 링크만 쓸 수 있게 한다."""
+        self.conn.execute("DELETE FROM auth_tokens WHERE expires_at < now()")
+        self.conn.execute(
+            "DELETE FROM auth_tokens WHERE user_id = %s AND purpose = %s", (user_id, purpose)
+        )
+        self.conn.execute(
+            """INSERT INTO auth_tokens (token_hash, user_id, purpose, expires_at)
+               VALUES (%s, %s, %s, %s)""",
+            (token_hash, user_id, purpose, expires_at),
+        )
+        self.conn.commit()
+
+    def consume_auth_token(self, purpose: str, token_hash: str) -> tuple[int, str] | None:
+        """토큰이 맞고 기한 안이면 (사용자 id, 이메일). 만료됐어도 지워서 한 번만 쓰게 한다."""
+        row = self.conn.execute(
+            """DELETE FROM auth_tokens t USING users u
+               WHERE t.user_id = u.id AND t.token_hash = %s AND t.purpose = %s
+               RETURNING t.user_id, u.email, t.expires_at > now()""",
+            (token_hash, purpose),
+        ).fetchone()
+        self.conn.commit()
+        return (row[0], row[1]) if row and row[2] else None
+
+    def reset_password(self, user_id: int, password_hash: str) -> None:
+        """메일 링크로 비밀번호 재설정. 메일을 받았으니 이메일도 인증된 것으로 본다.
+
+        모든 세션과 남은 재설정 링크를 한 트랜잭션에서 지운다."""
+        self.conn.execute(
+            """UPDATE users SET password_hash = %s,
+                 email_verified_at = COALESCE(email_verified_at, now())
+               WHERE id = %s""",
+            (password_hash, user_id),
+        )
+        self.conn.execute("DELETE FROM sessions WHERE user_id = %s", (user_id,))
+        self.conn.execute(
+            "DELETE FROM auth_tokens WHERE user_id = %s AND purpose = 'reset'", (user_id,)
+        )
+        self.conn.commit()
+
+    def remember_device(self, user_id: int, device_hash: str) -> str:
+        """로그인한 기기를 기록한다. 'first'(기록된 기기가 하나도 없었음), 'new', 'known'.
+
+        1년 동안 쓰지 않은 기기 기록은 지운다."""
+        self.conn.execute(
+            """DELETE FROM user_devices
+               WHERE user_id = %s AND last_seen < now() - interval '365 days'""",
+            (user_id,),
+        )
+        had_any = self.conn.execute(
+            "SELECT EXISTS (SELECT 1 FROM user_devices WHERE user_id = %s)", (user_id,)
+        ).fetchone()[0]
+        inserted = self.conn.execute(
+            """INSERT INTO user_devices (user_id, device_hash) VALUES (%s, %s)
+               ON CONFLICT (user_id, device_hash) DO UPDATE SET last_seen = now()
+               RETURNING (xmax = 0)""",
+            (user_id, device_hash),
+        ).fetchone()[0]
+        self.conn.commit()
+        if not had_any:
+            return "first"
+        return "new" if inserted else "known"
 
     def pending_alerts(self, channel: str) -> list[dict]:
         """관심 종목의 기준 이상 공시 중 이 채널로 아직 안 보낸 것.

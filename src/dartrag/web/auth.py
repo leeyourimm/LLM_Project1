@@ -1,4 +1,4 @@
-"""로그인에 필요한 것들: 비밀번호 해시, 세션 토큰, 로그인 시도 제한.
+"""로그인에 필요한 것들: 비밀번호 해시, 세션 토큰, 로그인 시도 제한, 기기 구분.
 
 외부 라이브러리 없이 표준 라이브러리(scrypt, secrets)만 쓴다.
 """
@@ -6,6 +6,7 @@
 import base64
 import hashlib
 import hmac
+import ipaddress
 import re
 import secrets
 import threading
@@ -82,6 +83,66 @@ def new_session_token() -> tuple[str, str]:
 
 def token_hash(token: str) -> str:
     return hashlib.sha256(token.encode()).hexdigest()
+
+
+# 메일 링크(비밀번호 재설정, 이메일 인증)에 넣는 한 번 쓰는 토큰도 세션 토큰과 같은 방식:
+# 원문은 메일에만, DB 에는 SHA-256 해시만
+new_link_token = new_session_token
+
+
+# --- 기기 구분 (새 기기 로그인 알림) -------------------------------------------
+# 브라우저 버전이나 휴대폰 IP 끝자리는 자주 바뀌어서, 그대로 쓰면 같은 기기도 매번 "새 기기"가
+# 된다. 브라우저 종류·OS·접속 네트워크(IPv4 /24, IPv6 /64)만 보고, 저장할 때는 해시만 남긴다.
+
+_BROWSERS = (
+    ("Edg/", "Edge"),
+    ("OPR/", "Opera"),
+    ("SamsungBrowser", "삼성 인터넷"),
+    ("Whale/", "Whale"),
+    ("CriOS", "Chrome"),
+    ("FxiOS", "Firefox"),
+    ("Firefox/", "Firefox"),
+    ("Chrome/", "Chrome"),
+    ("Safari/", "Safari"),
+)
+_SYSTEMS = (
+    ("iPhone", "iOS"),
+    ("iPad", "iPadOS"),
+    ("Android", "Android"),
+    ("CrOS", "ChromeOS"),
+    ("Windows", "Windows"),
+    ("Mac OS X", "macOS"),
+    ("Macintosh", "macOS"),
+    ("Linux", "Linux"),
+)
+
+
+def device_label(user_agent: str | None) -> tuple[str, str]:
+    """(브라우저, OS). 모르면 '알 수 없는 브라우저' 같은 값."""
+    ua = user_agent or ""
+    browser = next((name for key, name in _BROWSERS if key in ua), "알 수 없는 브라우저")
+    system = next((name for key, name in _SYSTEMS if key in ua), "알 수 없는 OS")
+    return browser, system
+
+
+def network_of(ip: str | None) -> str:
+    """접속 주소의 네트워크 대역. 예: 203.0.113.7 → 203.0.113.0/24."""
+    try:
+        addr = ipaddress.ip_address((ip or "").strip())
+    except ValueError:
+        return "알 수 없음"
+    if addr.version == 6 and addr.ipv4_mapped:
+        addr = addr.ipv4_mapped
+    prefix = 24 if addr.version == 4 else 64
+    return str(ipaddress.ip_network(f"{addr}/{prefix}", strict=False))
+
+
+def device_hash(key: str, user_id: int, user_agent: str | None, ip: str | None) -> str:
+    """기기 기록용 HMAC. IPv4 대역은 경우의 수가 적어 그냥 해시하면 되돌릴 수 있으므로
+    SECRET_KEY 를 키로 쓴다 (없으면 고정 문자열, doctor 가 SECRET_KEY 를 경고한다)."""
+    browser, system = device_label(user_agent)
+    msg = f"{user_id}|{browser}|{system}|{network_of(ip)}".encode()
+    return hmac.new((key or "dartrag-device").encode(), msg, hashlib.sha256).hexdigest()
 
 
 class LoginLimiter:

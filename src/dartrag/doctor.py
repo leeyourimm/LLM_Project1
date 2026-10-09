@@ -198,6 +198,41 @@ def check_alerts(settings: Settings) -> Check:
     )
 
 
+def check_account_mail(settings: Settings) -> Check:
+    """계정 메일(비밀번호 재설정, 가입 이메일 인증, 새 기기 로그인 알림) 점검."""
+    name = "계정 메일 (비밀번호 재설정·이메일 인증·새 기기 알림)"
+    s = settings
+    if not s.auth_required:
+        return Check(name, True, "로그인을 쓰지 않아 필요 없음", required=False)
+    if not (s.smtp_host and s.smtp_from):
+        problems = [
+            "메일 발송(SMTP_HOST, SMTP_FROM)이 없어 꺼져 있습니다. 비밀번호를 잊은 사용자는 "
+            "운영자가 dartrag user password 로 바꿔야 합니다"
+        ]
+        if s.email_verification_required:
+            problems.append("EMAIL_VERIFICATION_REQUIRED=true 지만 메일이 없어 적용되지 않습니다")
+        return Check(
+            name,
+            False,
+            "; ".join(problems),
+            ".env 의 SMTP_ 설정을 채우세요 (Gmail 이면 앱 비밀번호)",
+            required=False,
+        )
+    problems = []
+    if not s.public_url.startswith("https://") and s.environment == "production":
+        problems.append("메일 속 링크 주소 PUBLIC_URL 이 https 가 아닙니다")
+    if len(s.secret_key) < 32:
+        problems.append("새 기기 기록 해시에 SECRET_KEY(32자 이상)가 필요합니다")
+    verify = "인증 필수" if s.email_verification_required else "인증 선택"
+    return Check(
+        name,
+        not problems,
+        "; ".join(problems) if problems else f"사용 가능 (가입 이메일 {verify})",
+        "" if not problems else ".env 의 PUBLIC_URL, SECRET_KEY 를 확인하세요",
+        required=False,
+    )
+
+
 def security_problems(settings: Settings) -> list[str]:
     """인터넷에 공개할 때 위험한 설정. 내 컴퓨터에서만 쓸 때(로그인 끔)는 보지 않는다."""
     s = settings
@@ -246,6 +281,7 @@ def run_checks(settings: Settings, http: httpx.Client | None = None, *, online: 
             check_embedding_package(),
             check_ollama(settings, http),
             check_alerts(settings),
+            check_account_mail(settings),
             check_security(settings),
             check_disk(),
         ]
