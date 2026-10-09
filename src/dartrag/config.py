@@ -78,6 +78,26 @@ class Settings(BaseSettings):
     # PDF 리포트 한글 글꼴(TTF). 비우면 나눔고딕·애플고딕·맑은 고딕을 차례로 찾는다
     report_font: str | None = None
 
+    # 정기 평가: 일요일 새벽에 평가 문항 일부로 답변 품질을 재고 기록한다 (LLM 시간이 듦)
+    eval_schedule_enabled: bool = False
+    eval_schedule_cases: int = 60
+
+    # 요청 한도 (사용자별, 로그인하지 않았으면 접속 주소별). 0 이면 끔
+    rate_ask_per_minute: int = 6
+    rate_ask_per_day: int = 200
+    rate_heavy_per_hour: int = 10  # 비교 설명, 변경점 요약 새로 만들기, 요약이 든 PDF
+    rate_auth_per_hour: int = 20  # 가입·비밀번호 변경 (로그인 시도는 따로 제한)
+
+    # 운영 관측. 모두 비우면 꺼진다
+    environment: str = "development"  # development / production
+    metrics_token: str = ""  # 넣으면 /metrics 에 Authorization: Bearer <값> 이 필요
+    sentry_dsn: str = ""
+    sentry_traces_sample_rate: float = 0.0
+    langfuse_host: str = ""  # 예: http://localhost:3001
+    langfuse_public_key: str = ""
+    langfuse_secret_key: str = ""
+    langfuse_sample_rate: float = 1.0
+
 
 @lru_cache
 def get_settings() -> Settings:

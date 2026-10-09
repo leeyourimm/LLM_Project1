@@ -1,14 +1,18 @@
 """질문 → 하이브리드 검색 → LLM 답변 → 인용 검증."""
 
 import re
+import time
 from collections.abc import Iterator
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
 from typing import Protocol
 
 from dartrag.answer.guard import check_question
 from dartrag.answer.llm import _THINK_RE, LLM
 from dartrag.answer.numbers import split_sentences, unverified_numbers
 from dartrag.answer.prompt import NOT_FOUND, build_messages, source_text
+from dartrag.obs import metrics
+from dartrag.obs.tracing import NOOP, Tracer
 from dartrag.search import HybridRetriever, SearchFilter, SearchHit
 
 _CITE_RE = re.compile(r"\[(\d{1,2})\]")
@@ -39,6 +43,64 @@ class FinanceLookup(Protocol):
     def lookup(self, question: str, flt: SearchFilter | None = None) -> SearchHit | None: ...
 
 
+class _Run:
+    """질문 하나의 단계별 시간과 추적 기록."""
+
+    def __init__(self, tracer: Tracer, question: str, flt: SearchFilter, user_id, session_id):
+        self.started = time.monotonic()
+        self.timings: dict[str, float] = {}
+        self.trace = tracer.trace(
+            "answer",
+            input=question,
+            user_id=user_id,
+            session_id=session_id,
+            metadata={
+                "corp_codes": flt.corp_codes,
+                "year_from": flt.year_from,
+                "year_to": flt.year_to,
+            },
+        )
+
+    def retrieved(self, question: str, hits: list[SearchHit], start: datetime, t0: float):
+        self.timings["retrieve"] = time.monotonic() - t0
+        self.trace.span(
+            "retrieve",
+            start,
+            datetime.now(UTC),
+            input=question,
+            output=[
+                {
+                    "chunk_id": h.chunk_id,
+                    "score": round(h.score, 4) if h.score is not None else None,
+                    "rerank": h.rerank_score,
+                    "corp_name": h.chunk.get("corp_name"),
+                    "section": " > ".join(h.chunk.get("section_path", [])),
+                }
+                for h in hits
+            ],
+        )
+
+    def finish(self, result: "Answer", model: str, usage: dict | None) -> "Answer":
+        self.timings["total"] = time.monotonic() - self.started
+        metrics.record_answer(result, self.timings, usage, model)
+        self.trace.end(
+            output=result.text,
+            metadata={
+                "found": result.found,
+                "refused": result.refused,
+                "cached": result.cached,
+                "warnings": result.warnings,
+                "unverified_numbers": result.unverified,
+                "cited": [c.number for c in result.citations],
+            },
+        )
+        return result
+
+    def failed(self, error: Exception) -> None:
+        metrics.ANSWERS.labels("error").inc()
+        self.trace.end(output=None, metadata={"error": type(error).__name__})
+
+
 class Answerer:
     def __init__(
         self,
@@ -48,12 +110,14 @@ class Answerer:
         finance: FinanceLookup | None = None,
         top_k: int = 8,
         cache=None,  # AnswerCache
+        tracer: Tracer = NOOP,
     ):
         self.retriever = retriever
         self.llm = llm
         self.finance = finance
         self.top_k = top_k
         self.cache = cache
+        self.tracer = tracer
 
     def _precheck(self, question: str, flt: SearchFilter) -> Answer | None:
         """LLM 을 부르기 전에 끝나는 경우: 거절할 질문, 캐시에 있는 답."""
@@ -68,51 +132,120 @@ class Answerer:
         hits = self.retriever.search(question, flt, self.top_k - (1 if fin else 0))
         return [fin, *hits] if fin else hits
 
-    def answer(self, question: str, flt: SearchFilter | None = None) -> Answer:
-        flt = flt or SearchFilter()
-        if early := self._precheck(question, flt):
-            return early
+    def _retrieve(self, run: _Run, question: str, flt: SearchFilter) -> list[SearchHit]:
+        start, t0 = datetime.now(UTC), time.monotonic()
         hits = self.retrieve(question, flt)
-        if not hits:
-            result = Answer(question, NOT_FOUND, found=False)
-        else:
-            text = self.llm.chat(build_messages(question, hits))
-            result = check_citations(Answer(question, text, hits=hits))
+        run.retrieved(question, hits, start, t0)
+        return hits
+
+    def _usage(self) -> dict | None:
+        fn = getattr(self.llm, "usage", None)
+        return fn() if callable(fn) else None
+
+    def _generation(self, run: _Run, messages, text, start, t0, first_token=None, error=None):
+        run.timings["generate"] = time.monotonic() - t0
+        usage = self._usage()
+        run.trace.generation(
+            "generate",
+            start,
+            datetime.now(UTC),
+            model=self.llm.name,
+            input=[{"role": m.role, "content": m.content} for m in messages],
+            output=text,
+            usage=usage,
+            first_token=first_token,
+            level="ERROR" if error else None,
+        )
+        return usage
+
+    def answer(
+        self,
+        question: str,
+        flt: SearchFilter | None = None,
+        *,
+        user_id=None,
+        session_id=None,
+    ) -> Answer:
+        flt = flt or SearchFilter()
+        run = _Run(self.tracer, question, flt, user_id, session_id)
+        if early := self._precheck(question, flt):
+            return run.finish(early, self.llm.name, None)
+        usage = None
+        try:
+            hits = self._retrieve(run, question, flt)
+            if not hits:
+                result = Answer(question, NOT_FOUND, found=False)
+            else:
+                messages = build_messages(question, hits)
+                start, t0 = datetime.now(UTC), time.monotonic()
+                try:
+                    text = self.llm.chat(messages)
+                except Exception as e:
+                    self._generation(run, messages, None, start, t0, error=e)
+                    raise
+                usage = self._generation(run, messages, text, start, t0)
+                result = check_citations(Answer(question, text, hits=hits))
+        except Exception as e:
+            run.failed(e)
+            raise
         if self.cache:
             self.cache.put(question, flt, result)
-        return result
+        return run.finish(result, self.llm.name, usage)
 
-    def stream(self, question: str, flt: SearchFilter | None = None) -> Iterator[tuple]:
+    def stream(
+        self,
+        question: str,
+        flt: SearchFilter | None = None,
+        *,
+        user_id=None,
+        session_id=None,
+    ) -> Iterator[tuple]:
         """("sources", hits) → ("token", 조각)… → ("done", Answer) 순서로 낸다."""
         flt = flt or SearchFilter()
+        run = _Run(self.tracer, question, flt, user_id, session_id)
         if early := self._precheck(question, flt):
             if early.hits:
                 yield ("sources", early.hits)
             yield ("token", early.text)
-            yield ("done", early)
+            yield ("done", run.finish(early, self.llm.name, None))
             return
-        hits = self.retrieve(question, flt)
+        try:
+            hits = self._retrieve(run, question, flt)
+        except Exception as e:
+            run.failed(e)
+            raise
         if not hits:
             result = Answer(question, NOT_FOUND, found=False)
             if self.cache:
                 self.cache.put(question, flt, result)
-            yield ("done", result)
+            yield ("done", run.finish(result, self.llm.name, None))
             return
         yield ("sources", hits)
         messages = build_messages(question, hits)
         parts: list[str] = []
-        if hasattr(self.llm, "stream"):
-            for piece in self.llm.stream(messages):
-                parts.append(piece)
-                yield ("token", piece)
-        else:
-            parts.append(self.llm.chat(messages))
-            yield ("token", parts[0])
+        start, t0 = datetime.now(UTC), time.monotonic()
+        first_token = None
+        try:
+            if hasattr(self.llm, "stream"):
+                for piece in self.llm.stream(messages):
+                    if first_token is None:
+                        first_token = datetime.now(UTC)
+                        run.timings["first_token"] = time.monotonic() - t0
+                    parts.append(piece)
+                    yield ("token", piece)
+            else:
+                parts.append(self.llm.chat(messages))
+                yield ("token", parts[0])
+        except Exception as e:
+            self._generation(run, messages, "".join(parts), start, t0, first_token, error=e)
+            run.failed(e)
+            raise
         text = _THINK_RE.sub("", "".join(parts)).strip()
+        usage = self._generation(run, messages, text, start, t0, first_token)
         result = check_citations(Answer(question, text, hits=hits))
         if self.cache:
             self.cache.put(question, flt, result)
-        yield ("done", result)
+        yield ("done", run.finish(result, self.llm.name, usage))
 
 
 def check_citations(answer: Answer) -> Answer:

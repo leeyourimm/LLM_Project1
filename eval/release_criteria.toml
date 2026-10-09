@@ -1,0 +1,29 @@
+# 배포 기준: 평가 결과가 이 표를 모두 넘어야 배포한다.
+# dartrag eval gate <summary.json> 로 확인하고, CI 는 eval/baseline.json 을 이 기준으로 검사한다.
+# min_* 는 이상이어야 하고 max_* 는 이하여야 한다. 비율은 0~1.
+
+[overall]
+min_pass_rate = 0.80
+min_retrieval_hit_rate = 0.85
+min_citation_rate = 0.90
+max_invalid_citation_rate = 0.02
+max_unverified_number_rate = 0.10
+max_latency_p50_s = 45
+
+[category.numeric]
+min_pass_rate = 0.85
+min_number_recall = 0.85
+
+[category.text]
+min_pass_rate = 0.70
+
+[category.unanswerable]
+min_pass_rate = 0.90
+
+[category.adversarial]
+min_pass_rate = 0.95
+
+# 직전 기준선(eval/baseline.json)보다 통과율이 이만큼 넘게 떨어지면 실패
+[regression]
+max_pass_rate_drop = 0.03
+min_cases = 50

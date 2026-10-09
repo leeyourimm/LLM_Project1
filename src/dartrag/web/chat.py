@@ -10,6 +10,7 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
 from dartrag.answer.conversation import Resolved, TurnContext, resolve
+from dartrag.obs import metrics
 from dartrag.search import SearchFilter
 
 DISCLAIMER = "공시 정보 요약이며 투자 권유가 아닙니다. 중요한 판단은 원문을 확인하세요."
@@ -56,7 +57,15 @@ def _sse(event: str, data: dict) -> str:
     return f"event: {event}\ndata: {json.dumps(data, ensure_ascii=False, default=str)}\n\n"
 
 
-def build_router(services, CurrentUser, corp_codes: Callable) -> APIRouter:  # noqa: N803
+def _no_limit(scope: str, when=None):
+    from fastapi import Depends
+
+    return Depends(lambda: None)
+
+
+def build_router(  # noqa: N803
+    services, CurrentUser, corp_codes: Callable, rate: Callable = _no_limit
+) -> APIRouter:
     router = APIRouter()
 
     def uid(user) -> int | None:
@@ -110,7 +119,7 @@ def build_router(services, CurrentUser, corp_codes: Callable) -> APIRouter:  # n
             "disclaimer": DISCLAIMER,
         }
 
-    @router.post("/api/ask")
+    @router.post("/api/ask", dependencies=[rate("ask")])
     def ask(req: AskRequest, user: CurrentUser = None):
         from dartrag.answer import LLMError
 
@@ -119,12 +128,14 @@ def build_router(services, CurrentUser, corp_codes: Callable) -> APIRouter:  # n
             conv_id, resolved, flt, _ = prepare(repo, req, user)
             answerer = services.answerer(repo)
             try:
-                result = answerer.answer(resolved.question, flt)
+                result = answerer.answer(
+                    resolved.question, flt, user_id=uid(user), session_id=conv_id
+                )
             except LLMError as e:
                 raise HTTPException(503, str(e)) from None
             return finish(repo, conv_id, resolved, result, answerer.llm.name, started)
 
-    @router.post("/api/ask/stream")
+    @router.post("/api/ask/stream", dependencies=[rate("ask")])
     def ask_stream(req: AskRequest, user: CurrentUser = None):
         """Server-Sent Events: meta → token… → done (오류는 error)."""
         from dartrag.answer import LLMError
@@ -146,7 +157,10 @@ def build_router(services, CurrentUser, corp_codes: Callable) -> APIRouter:  # n
                     },
                 )
                 try:
-                    for kind, value in answerer.stream(resolved.question, flt):
+                    stream = answerer.stream(
+                        resolved.question, flt, user_id=uid(user), session_id=conv_id
+                    )
+                    for kind, value in stream:
                         if kind == "sources":
                             yield _sse("sources", {"sources": _sources(value)})
                         elif kind == "token":
@@ -192,6 +206,7 @@ def build_router(services, CurrentUser, corp_codes: Callable) -> APIRouter:  # n
             ok = repo.set_feedback(message_id, uid(user), req.rating, req.reason, req.comment)
         if not ok:
             raise HTTPException(404, "평가할 답변을 찾을 수 없습니다")
+        metrics.FEEDBACK.labels("up" if req.rating == 1 else "down").inc()
         return {"ok": True}
 
     return router

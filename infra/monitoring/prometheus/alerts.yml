@@ -1,0 +1,83 @@
+# 서비스가 망가졌거나 곧 망가질 신호. Grafana 의 Alerting 화면과 Prometheus 의 Alerts 화면에 뜬다.
+groups:
+  - name: dartrag
+    rules:
+      - alert: ApiDown
+        expr: up{job="dartrag-api"} == 0
+        for: 2m
+        labels: {severity: critical}
+        annotations:
+          summary: API 서버가 응답하지 않습니다
+
+      - alert: StateUnreadable
+        expr: dartrag_state_up == 0
+        for: 5m
+        labels: {severity: critical}
+        annotations:
+          summary: DB 나 Redis 상태를 읽지 못합니다 (DB 연결 확인)
+
+      - alert: HighErrorRate
+        expr: |
+          sum(rate(dartrag_http_requests_total{status=~"5.."}[10m]))
+            / clamp_min(sum(rate(dartrag_http_requests_total[10m])), 0.001) > 0.05
+        for: 10m
+        labels: {severity: warning}
+        annotations:
+          summary: API 요청의 5% 넘게 서버 오류로 끝납니다
+
+      - alert: AnswersFailing
+        expr: |
+          sum(increase(dartrag_answers_total{outcome="error"}[30m]))
+            / clamp_min(sum(increase(dartrag_answers_total[30m])), 1) > 0.2
+        for: 15m
+        labels: {severity: critical}
+        annotations:
+          summary: 답변 생성이 자주 실패합니다 (Ollama 가 켜져 있는지 확인)
+
+      - alert: SlowFirstToken
+        expr: |
+          histogram_quantile(0.9, sum by (le) (rate(dartrag_answer_stage_seconds_bucket{stage="first_token"}[30m]))) > 30
+        for: 30m
+        labels: {severity: warning}
+        annotations:
+          summary: 답변 첫 글자가 나오기까지 30초 넘게 걸리는 질문이 많습니다
+
+      - alert: FeedPollStale
+        expr: dartrag_job_last_success_age_seconds{job="feed_poll"} > 3600
+        for: 10m
+        labels: {severity: critical}
+        annotations:
+          summary: 공시 피드를 1시간 넘게 받지 못했습니다 (작업자·OpenDART 확인)
+
+      - alert: JobFailing
+        expr: dartrag_job_last_failed == 1
+        for: 30m
+        labels: {severity: warning}
+        annotations:
+          summary: "{{ $labels.job }} 작업의 마지막 실행이 실패했습니다 (dartrag jobs status)"
+
+      - alert: IngestBacklog
+        expr: dartrag_ingest_backlog > 50
+        for: 2h
+        labels: {severity: warning}
+        annotations:
+          summary: 처리하지 못한 정기보고서가 쌓이고 있습니다
+
+      - alert: DartQuotaNearLimit
+        expr: dartrag_dart_calls_today / dartrag_dart_daily_limit > 0.9
+        labels: {severity: warning}
+        annotations:
+          summary: 오늘 OpenDART 호출 한도의 90%를 썼습니다
+
+      - alert: EvalBelowReleaseCriteria
+        expr: dartrag_eval_release_passed == 0
+        labels: {severity: warning}
+        annotations:
+          summary: 최근 정기 평가가 배포 기준을 넘지 못했습니다 (reports/eval 의 gate.md 확인)
+
+      - alert: DataIssuesErrors
+        expr: dartrag_data_issues{severity="error"} > 0
+        for: 1h
+        labels: {severity: info}
+        annotations:
+          summary: 재무 데이터 검증 오류가 있습니다 (dartrag validate)

@@ -17,11 +17,14 @@ dependencies = [
   "redis>=5.0",
   "reportlab>=4.2",
   "celery[redis]>=5.4",
+  "prometheus-client>=0.20",
 ]
 
 [project.optional-dependencies]
 embed = ["sentence-transformers>=3.0"]
-dev = ["pytest>=8", "respx>=0.21", "ruff>=0.5", "fakeredis>=2.23"]
+# 오류 수집 (SENTRY_DSN 을 넣을 때만 씀)
+ops = ["sentry-sdk[fastapi,celery]>=2.10"]
+dev = ["pytest>=8", "respx>=0.21", "ruff>=0.5", "fakeredis>=2.23", "sentry-sdk>=2.10"]
 
 [project.scripts]
 dartrag = "dartrag.cli:app"

@@ -19,11 +19,13 @@ from celery import Celery
 from celery.schedules import crontab
 
 from dartrag.config import get_settings
+from dartrag.obs.errors import init_sentry
 from dartrag.worker import jobs
 
 log = logging.getLogger(__name__)
 
 settings = get_settings()
+init_sentry(settings, "worker")
 app = Celery("dartrag", broker=settings.redis_url, backend=settings.redis_url)
 app.conf.update(
     task_default_queue="default",
@@ -33,6 +35,7 @@ app.conf.update(
         "dartrag.backfill": {"queue": "dart"},
         "dartrag.process": {"queue": "process"},
         "dartrag.process_backlog": {"queue": "process"},
+        "dartrag.evaluate": {"queue": "process"},
     },
     timezone="Asia/Seoul",
     task_acks_late=True,  # 작업자가 죽으면 다른 작업자가 다시 받는다
@@ -53,9 +56,15 @@ def ctx() -> jobs.Context:
     return _ctx
 
 
-def _run(name, fn, lock_key=None, **kwargs):
+def _run(name, fn, lock_key=None, lock_seconds=3600, **kwargs):
     try:
-        return jobs.run_job(ctx(), name, lambda c, r: fn(c, r, **kwargs), lock_key=lock_key)
+        return jobs.run_job(
+            ctx(),
+            name,
+            lambda c, r: fn(c, r, **kwargs),
+            lock_key=lock_key,
+            lock_seconds=lock_seconds,
+        )
     except jobs.JobSkipped:
         log.info("%s 이(가) 이미 실행 중이라 건너뜀", name)
         return {"skipped": True}
@@ -110,6 +119,14 @@ def validate():
     return _run("validate", jobs.validate)
 
 
+@app.task(name="dartrag.evaluate")
+def evaluate():
+    if not settings.eval_schedule_enabled:
+        return {"disabled": True}
+    # 답변을 수십 개 만들므로 몇 시간 걸릴 수 있다
+    return _run("evaluate", jobs.evaluate, lock_seconds=6 * 3600)
+
+
 @app.task(name="dartrag.maintenance")
 def maintenance():
     return _run("maintenance", jobs.maintenance)
@@ -128,4 +145,9 @@ app.conf.beat_schedule = {
     # 새벽에: 전체 검증, 보관 기간 정리
     "validate": {"task": "dartrag.validate", "schedule": crontab(hour=4, minute=10)},
     "maintenance": {"task": "dartrag.maintenance", "schedule": crontab(hour=4, minute=40)},
+    # 일요일 새벽: 정기 평가 (EVAL_SCHEDULE_ENABLED=true 일 때만)
+    "evaluate": {
+        "task": "dartrag.evaluate",
+        "schedule": crontab(hour=2, minute=0, day_of_week="sun"),
+    },
 }

@@ -418,7 +418,16 @@ def telegram_webhook():
 
 jobs_app = typer.Typer(help="백그라운드 작업 (보통은 Celery 작업자가 자동으로 실행)")
 app.add_typer(jobs_app, name="jobs")
-JOB_NAMES = ("feed_poll", "ingest", "process", "send_alerts", "backfill", "validate", "maintenance")
+JOB_NAMES = (
+    "feed_poll",
+    "ingest",
+    "process",
+    "send_alerts",
+    "backfill",
+    "validate",
+    "maintenance",
+    "evaluate",
+)
 
 
 @jobs_app.command("run")
@@ -582,18 +591,11 @@ def watch_list():
 
 
 @app.command()
-def serve(host: str = "127.0.0.1", port: int = 8000):
+def serve(host: str = "127.0.0.1", port: int = 8000, reload: bool = False):
     """웹 화면과 API 서버 실행 (기본: http://127.0.0.1:8000)."""
     import uvicorn
 
-    from dartrag.web import create_app, default_services
-
-    logging.basicConfig(level=logging.INFO)
-    logging.getLogger("httpx").setLevel(logging.WARNING)
     settings = get_settings()
-    repo = Repository.connect(settings.database_url)
-    repo.migrate()
-    repo.conn.close()
     if host not in ("127.0.0.1", "localhost", "::1") and not settings.auth_required:
         typer.echo(
             "주의: 다른 컴퓨터에서 접속할 수 있게 열었는데 로그인이 꺼져 있습니다. "
@@ -601,7 +603,7 @@ def serve(host: str = "127.0.0.1", port: int = 8000):
             err=True,
         )
     typer.echo(f"http://{host}:{port} 에서 열립니다")
-    uvicorn.run(create_app(default_services(settings)), host=host, port=port)
+    uvicorn.run("dartrag.web.asgi:app", host=host, port=port, reload=reload)
 
 
 eval_app = typer.Typer(help="답변 품질 평가")
@@ -635,12 +637,14 @@ def eval_run(
     out: Path = Path("reports/eval"),
     limit: int | None = None,
     min_pass_rate: float | None = None,
+    gate: Annotated[
+        bool, typer.Option(help="배포 기준(eval/release_criteria.toml) 미달이면 실패")
+    ] = False,
 ):
-    """평가 문항으로 검색·답변을 실행하고 채점 리포트 작성."""
-    from datetime import datetime
-
+    """평가 문항으로 검색·답변을 실행하고 채점 리포트와 배포 기준 판정을 작성."""
     from dartrag.answer.prompt import PROMPT_VERSION
-    from dartrag.eval import load_cases, run_eval, summarize, write_report
+    from dartrag.eval import load_cases
+    from dartrag.eval.service import run_and_record
     from dartrag.factory import build_answerer
 
     settings = get_settings()
@@ -653,8 +657,6 @@ def eval_run(
         mark = "통과" if g.passed else "실패: " + "; ".join(g.reasons)
         typer.echo(f"[{i}/{len(cases)}] {g.case_id} {mark}")
 
-    grades = run_eval(cases, answerer.answer, repo.corp_codes_for_stocks, progress)
-    run_dir = out / datetime.now().strftime("%Y%m%d-%H%M%S")
     meta = {
         "llm": settings.llm_model,
         "embed": settings.embed_model,
@@ -663,12 +665,70 @@ def eval_run(
         "cases": len(cases),
         "files": ", ".join(str(f) for f in files),
     }
-    report = write_report(run_dir, grades, meta)
-    rate = summarize(grades)["overall"]["pass_rate"] or 0.0
-    typer.echo(f"통과율 {rate:.1%} → {report}")
+    result = run_and_record(repo, answerer, cases, out, meta, on_progress=progress)
+    rate = result["summary"]["overall"]["pass_rate"] or 0.0
+    typer.echo(f"통과율 {rate:.1%} → {result['report']}")
+    typer.echo("\n" + result["gate"])
     if min_pass_rate is not None and rate < min_pass_rate:
         typer.echo(f"기준 통과율 {min_pass_rate:.0%} 미달", err=True)
         raise typer.Exit(1)
+    if gate and not result["passed"]:
+        raise typer.Exit(1)
+    typer.echo(f"\n이 결과를 새 기준선으로 쓰려면: dartrag eval baseline {result['summary_path']}")
+
+
+@eval_app.command("gate")
+def eval_gate(summary_path: Path, baseline: Path = Path("eval/baseline.json")):
+    """평가 요약(summary.json)이 배포 기준을 넘는지 확인."""
+    import json
+
+    from dartrag.eval.gate import check_release, load_baseline, load_criteria, render_checks
+
+    summary = json.loads(summary_path.read_text("utf-8"))
+    checks = check_release(summary, load_criteria(), load_baseline(baseline))
+    typer.echo(render_checks(checks))
+    if not all(c.ok for c in checks):
+        raise typer.Exit(1)
+
+
+@eval_app.command("baseline")
+def eval_baseline(summary_path: Path, out: Path = Path("eval/baseline.json")):
+    """평가 요약을 기준선으로 저장 (저장소에 함께 올리면 CI 가 이것으로 검사)."""
+    import json
+
+    from dartrag.eval.gate import check_release, load_criteria
+
+    summary = json.loads(summary_path.read_text("utf-8"))
+    failed = [c.name for c in check_release(summary, load_criteria()) if not c.ok]
+    if failed:
+        typer.echo(f"배포 기준 미달이라 기준선으로 쓸 수 없습니다: {', '.join(failed)}", err=True)
+        raise typer.Exit(1)
+    out.write_text(json.dumps(summary, ensure_ascii=False, indent=2) + "\n", "utf-8")
+    typer.echo(f"기준선 저장 → {out}")
+
+
+@eval_app.command("ci-check")
+def eval_ci_check():
+    """CI 용: eval/baseline.json 이 배포 기준을 넘고 현재 프롬프트로 잰 것인지 확인."""
+    from dartrag.answer.prompt import PROMPT_VERSION
+    from dartrag.eval.gate import ci_check
+
+    ok, text = ci_check(prompt_version=PROMPT_VERSION)
+    typer.echo(text)
+    if not ok:
+        raise typer.Exit(1)
+
+
+@eval_app.command("promote")
+def eval_promote(
+    candidates: Path = Path("eval/feedback_candidates.jsonl"),
+    target: Path = Path("eval/manual.jsonl"),
+):
+    """정답을 채운 사용자 평가 후보 문항을 평가셋으로 옮김."""
+    from dartrag.eval.service import promote_reviewed
+
+    moved, left = promote_reviewed(candidates, target)
+    typer.echo(f"{moved}문항을 {target} 로 옮김. 검수할 후보 {left}문항 남음")
 
 
 @app.command()
@@ -829,17 +889,24 @@ def feedback_stats():
 
 @feedback_app.command("export")
 def feedback_export(out: Path = Path("eval/feedback_candidates.jsonl")):
-    """👎 받은 질문을 평가셋 후보로 저장 (정답은 원문을 보고 직접 채운 뒤 manual.jsonl 로 옮김)."""
-    from dartrag.eval import save_cases
+    """👎 받은 질문을 평가셋 후보에 추가 (정답을 채운 뒤 dartrag eval promote 로 옮김).
+
+    이미 후보에 있거나 평가셋으로 옮긴 질문은 다시 넣지 않는다."""
+    from dartrag.eval import load_cases, save_cases
     from dartrag.eval.feedback import feedback_to_cases
 
     rows = Repository.connect(get_settings().database_url).feedback_rows(rating=-1)
-    cases = feedback_to_cases(rows)
-    if not cases:
-        typer.echo("👎 평가가 없습니다.")
+    existing = load_cases(out) if out.exists() else []
+    manual = Path("eval/manual.jsonl")
+    known = {c.id for c in existing} | (
+        {c.id for c in load_cases(manual)} if manual.exists() else set()
+    )
+    new = [c for c in feedback_to_cases(rows) if c.id not in known]
+    if not new:
+        typer.echo("새로 추가할 👎 평가가 없습니다.")
         return
-    save_cases(out, cases)
-    typer.echo(f"{len(cases)}문항 → {out}")
+    save_cases(out, existing + new)
+    typer.echo(f"{len(new)}문항 추가 → {out} (후보 {len(existing) + len(new)}문항)")
 
 
 if __name__ == "__main__":

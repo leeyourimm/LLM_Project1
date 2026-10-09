@@ -279,4 +279,4 @@ def test_celery_schedule():
     routes = app.conf.task_routes
     assert routes["dartrag.ingest"]["queue"] == "dart"
     assert routes["dartrag.process"]["queue"] == "process"
-    assert {"dartrag.feed_poll", "dartrag.maintenance", "dartrag.validate"} <= set(app.tasks)
+    assert {"dartrag.feed_poll", "dartrag.maintenance", "dartrag.evaluate"} <= set(app.tasks)

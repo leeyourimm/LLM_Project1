@@ -6,7 +6,7 @@ DB 연결은 요청마다 새로 열어 요청끼리 트랜잭션이 섞이지 �
 
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from dartrag.config import Settings
 from dartrag.db import Repository
@@ -30,6 +30,12 @@ class Services:
     secret_key: str = ""
     telegram_bot_username: str = ""
     telegram_webhook_secret: str = ""
+    # 요청 한도: 범위(ask, heavy, auth) → 규칙들. 비어 있으면 제한하지 않는다
+    limits: dict = field(default_factory=dict)
+    redis: Callable[[], object] | None = None
+    # 운영 지표: /metrics 보호용 토큰, DB·Redis 상태 읽기
+    metrics_token: str = ""
+    ops_snapshot: Callable[[], dict] | None = None
     # 화면을 다른 주소에서 띄울 때(예: Next 개발 서버 http://localhost:3000) 그 주소
     allowed_origins: tuple[str, ...] = ()
 
@@ -73,4 +79,33 @@ def default_services(settings: Settings) -> Services:
         secret_key=settings.secret_key,
         telegram_bot_username=settings.telegram_bot_username,
         telegram_webhook_secret=settings.telegram_webhook_secret,
+        limits=rate_limits(settings),
+        redis=lambda: backends.redis,
+        metrics_token=settings.metrics_token,
+        ops_snapshot=lambda: ops_snapshot(settings, repo, backends.redis),
     )
+
+
+def rate_limits(settings: Settings) -> dict:
+    from dartrag.web.ratelimit import Rule
+
+    s = settings
+    return {
+        "ask": [
+            Rule(s.rate_ask_per_minute, 60, f"1분에 {s.rate_ask_per_minute}번"),
+            Rule(s.rate_ask_per_day, 86400, f"하루 {s.rate_ask_per_day}번"),
+        ],
+        "heavy": [Rule(s.rate_heavy_per_hour, 3600, f"1시간에 {s.rate_heavy_per_hour}번")],
+        "auth": [Rule(s.rate_auth_per_hour, 3600, f"1시간에 {s.rate_auth_per_hour}번")],
+    }
+
+
+def ops_snapshot(settings: Settings, repo, redis) -> dict:
+    with repo() as r:
+        snap = r.ops_snapshot()
+    snap["dart_daily_limit"] = settings.dart_daily_limit
+    if redis is not None:
+        from dartrag.dart.quota import DailyQuota
+
+        snap["dart_calls_today"] = DailyQuota(redis, settings.dart_daily_limit).used()
+    return snap

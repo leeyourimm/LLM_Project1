@@ -969,6 +969,49 @@ class Repository:
         cols = [c.name for c in cur.description]
         return {r[0]: dict(zip(cols[1:], r[1:], strict=True)) for r in cur.fetchall()}
 
+    # --- 운영 지표 ---------------------------------------------------------
+
+    def ops_snapshot(self) -> dict:
+        """Prometheus 지표용 현재 상태 (작업, 처리 대기, 데이터 오류, 사용자, 최근 평가)."""
+        jobs = [
+            {"name": name, "last_success": r["last_ok"], "status": r["last_status"]}
+            for name, r in self.last_job_runs().items()
+        ]
+        issues = dict(
+            self.conn.execute(
+                "SELECT severity, count(*) FROM data_issues GROUP BY severity"
+            ).fetchall()
+        )
+        users = self.conn.execute("SELECT count(*) FROM users").fetchone()[0]
+        out = {
+            "jobs": jobs,
+            "ingest_backlog": self.ingest_backlog()["pending"],
+            "issues": {"error": issues.get("error", 0), "warn": issues.get("warn", 0)},
+            "users": users,
+        }
+        if latest := self.latest_eval_run():
+            out["eval"] = latest
+        return out
+
+    def save_eval_run(self, meta: dict, summary: dict, passed: bool) -> int:
+        from psycopg.types.json import Jsonb
+
+        row = self.conn.execute(
+            "INSERT INTO eval_runs (meta, summary, passed) VALUES (%s, %s, %s) RETURNING id",
+            (Jsonb(meta), Jsonb(summary), passed),
+        ).fetchone()
+        self.conn.commit()
+        return row[0]
+
+    def latest_eval_run(self) -> dict | None:
+        row = self.conn.execute(
+            """SELECT id, finished_at, meta, summary, passed FROM eval_runs
+               ORDER BY finished_at DESC LIMIT 1"""
+        ).fetchone()
+        if row is None:
+            return None
+        return dict(zip(("id", "finished_at", "meta", "summary", "passed"), row, strict=True))
+
     def purge_job_runs(self, older_than_days: int) -> int:
         cur = self.conn.execute(
             "DELETE FROM job_runs WHERE started_at < now() - make_interval(days => %s)",

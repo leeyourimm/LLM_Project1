@@ -31,6 +31,8 @@ jobs:
       - run: ruff check .
       - run: ruff format --check .
       - run: pytest -q
+      # 프롬프트·모델을 바꾸면 실제 평가 결과(eval/baseline.json)도 함께 올려야 통과
+      - run: dartrag eval ci-check
 
   frontend:
     runs-on: ubuntu-latest
