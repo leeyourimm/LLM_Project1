@@ -1,0 +1,23 @@
+from functools import lru_cache
+from pathlib import Path
+from typing import Literal
+
+from pydantic_settings import BaseSettings, SettingsConfigDict
+
+
+class Settings(BaseSettings):
+    model_config = SettingsConfigDict(env_file=".env", extra="ignore")
+
+    dart_api_key: str = ""
+    dart_min_interval: float = 0.2
+    database_url: str = "postgresql://dartrag:dartrag@localhost:5432/dartrag"
+
+    raw_store: Literal["local", "s3"] = "local"
+    raw_store_dir: Path = Path("./data/raw")
+    s3_endpoint_url: str | None = None
+    s3_bucket: str = "dart-raw"
+
+
+@lru_cache
+def get_settings() -> Settings:
+    return Settings()
