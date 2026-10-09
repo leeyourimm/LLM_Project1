@@ -19,6 +19,8 @@ RUN python -m venv /opt/venv
 
 WORKDIR /src
 # 버전은 requirements/ 잠금 파일(ops+embed)로 고정한다. 갱신 방법은 docs/deploy.md 참고
+# 잠금 파일은 x86_64 기준으로 풀었지만 해시에 aarch64 휠도 모두 들어 있고 설치할 패키지도 같아서,
+# linux/arm64(예: Oracle Cloud Ampere A1)도 이 파일 그대로 설치한다. CI 의 docker-arm64 작업이 확인한다
 
 # PyTorch 는 크고 자주 바뀌지 않으므로 따로 설치해 빌드 캐시를 살린다.
 # 버전만 고정한다(CPU 색인 파일의 해시는 잠금 파일에 없다). 의존 패키지는 아래 잠금 파일에서 받는다
