@@ -202,6 +202,22 @@ docker image prune -f
 
 업데이트 전에 백업을 한 번 해 두면 안전합니다 (다음 절).
 
+### 의존성 버전 (잠금 파일)
+
+백엔드 이미지와 CI는 `pyproject.toml` 이 아니라 `requirements/` 의 잠금 파일로 설치합니다 (버전과 해시 고정, Linux x86_64·Python 3.12 기준).
+
+- `requirements/runtime.txt`: 배포 이미지용 (`ops`, `embed`). PyTorch·CUDA 패키지는 뺍니다.
+- `requirements/torch.txt`: PyTorch 버전. 이미지는 CPU 전용 색인에서 이 버전을 받습니다 (해시는 고정하지 않음).
+- `requirements/dev.txt`: 테스트·CI용 (`dev`). 내 컴퓨터에서는 지금처럼 `pip install -e ".[dev]"` 를 써도 됩니다.
+
+`pyproject.toml` 의 의존성을 바꿨거나 버전을 올릴 때는 [uv](https://docs.astral.sh/uv/)를 설치한 뒤 다시 만들고 함께 커밋합니다. CI의 `audit` 작업이 잠금 파일(pip-audit)과 웹 화면 패키지(`npm audit`)의 알려진 취약점을 검사합니다. Dependabot이 매주 업데이트 PR을 엽니다.
+
+```bash
+make lock                 # pyproject.toml 에 맞춰 다시 만든다 (이미 고정된 버전은 되도록 유지)
+make lock UPGRADE=-U      # 모두 최신으로
+make lock UPGRADE="-P fastapi"   # 한 패키지만 올리기
+```
+
 ## 8. 설정 바꾸기
 
 `.env`를 고친 뒤 다시 띄우면 바뀐 컨테이너만 새로 만들어집니다.
