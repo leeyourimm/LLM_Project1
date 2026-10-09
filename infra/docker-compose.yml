@@ -1,0 +1,51 @@
+# 로컬 개발용 인프라: Postgres, Qdrant, OpenSearch(nori), MinIO, Redis
+name: dartrag
+
+services:
+  postgres:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: dartrag
+      POSTGRES_PASSWORD: dartrag
+      POSTGRES_DB: dartrag
+    ports: ["5432:5432"]
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./db:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U dartrag"]
+      interval: 5s
+      retries: 10
+
+  qdrant:
+    image: qdrant/qdrant:v1.12.4
+    ports: ["6333:6333"]
+    volumes: [qdrantdata:/qdrant/storage]
+
+  opensearch:
+    build: ./opensearch
+    environment:
+      discovery.type: single-node
+      DISABLE_SECURITY_PLUGIN: "true"
+      OPENSEARCH_JAVA_OPTS: -Xms1g -Xmx1g
+    ports: ["9200:9200"]
+    volumes: [osdata:/usr/share/opensearch/data]
+
+  minio:
+    image: minio/minio:RELEASE.2024-12-18T13-15-44Z
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: minioadmin
+      MINIO_ROOT_PASSWORD: minioadmin
+    ports: ["9000:9000", "9001:9001"]
+    volumes: [miniodata:/data]
+
+  redis:
+    image: redis:7
+    ports: ["6379:6379"]
+
+volumes:
+  pgdata:
+  qdrantdata:
+  osdata:
+  miniodata:
