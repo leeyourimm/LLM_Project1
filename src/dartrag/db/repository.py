@@ -6,6 +6,7 @@ import psycopg
 from dartrag.dart.models import Corp, Filing
 from dartrag.dart.reports import PeriodicReport
 from dartrag.parsing import Chunk
+from dartrag.search.types import IndexedChunk
 
 SCHEMA_DIR = Path(__file__).resolve().parents[3] / "infra" / "db"
 
@@ -43,6 +44,12 @@ class Repository:
             )
         self.conn.commit()
         return len(rows)
+
+    def corp_codes_for_stocks(self, stock_codes: list[str]) -> list[str]:
+        rows = self.conn.execute(
+            "SELECT corp_code FROM companies WHERE stock_code = ANY(%s)", (stock_codes,)
+        ).fetchall()
+        return [r[0] for r in rows]
 
     def fiscal_end_month(self, corp_code: str) -> int:
         row = self.conn.execute(
@@ -158,3 +165,90 @@ class Repository:
                 (parser_version, rcept_no),
             )
         return len(rows)
+
+    def filings_to_index(
+        self, index_version: int, index_model: str, corp_codes: list[str] | None = None
+    ) -> list[str]:
+        """파싱은 됐지만 아직 색인하지 않았거나, 재파싱·모델 변경으로 다시 색인해야 하는 공시."""
+        query = """
+            SELECT rcept_no FROM filings
+            WHERE parsed_at IS NOT NULL
+              AND (indexed_at IS NULL OR indexed_at < parsed_at
+                   OR index_version IS DISTINCT FROM %s OR index_model IS DISTINCT FROM %s)
+        """
+        params: list = [index_version, index_model]
+        if corp_codes:
+            query += " AND corp_code = ANY(%s)"
+            params.append(corp_codes)
+        rows = self.conn.execute(query + " ORDER BY rcept_dt, rcept_no", params).fetchall()
+        return [r[0] for r in rows]
+
+    def indexed_chunks(self, rcept_no: str) -> list[IndexedChunk]:
+        rows = self.conn.execute(
+            """
+            SELECT ch.chunk_id, ch.rcept_no, ch.corp_code, co.corp_name, f.report_kind,
+                   f.period_key, ch.kind, ch.section_path, ch.context, ch.body
+            FROM chunks ch
+            JOIN filings f USING (rcept_no)
+            JOIN companies co ON co.corp_code = ch.corp_code
+            WHERE ch.rcept_no = %s
+            ORDER BY ch.source_file, ch.ord
+            """,
+            (rcept_no,),
+        ).fetchall()
+        return [
+            IndexedChunk(
+                chunk_id=r[0],
+                rcept_no=r[1],
+                corp_code=r[2],
+                corp_name=r[3],
+                report_kind=r[4],
+                period_key=r[5],
+                kind=r[6],
+                section_path=list(r[7]),
+                text=f"{r[8]}\n\n{r[9]}",
+            )
+            for r in rows
+        ]
+
+    def mark_indexed(self, rcept_no: str, index_version: int, index_model: str) -> None:
+        self.conn.execute(
+            """UPDATE filings SET indexed_at = now(), index_version = %s, index_model = %s
+               WHERE rcept_no = %s""",
+            (index_version, index_model, rcept_no),
+        )
+        self.conn.commit()
+
+    def get_chunks(self, chunk_ids: list[str]) -> dict[str, dict]:
+        """검색 결과에 붙일 청크 본문과 출처."""
+        rows = self.conn.execute(
+            """
+            SELECT ch.chunk_id, ch.rcept_no, co.corp_name, f.report_nm, f.report_kind,
+                   f.period_key, f.rcept_dt, ch.kind, ch.section_path, ch.body, ch.unit
+            FROM chunks ch
+            JOIN filings f USING (rcept_no)
+            JOIN companies co ON co.corp_code = ch.corp_code
+            WHERE ch.chunk_id = ANY(%s)
+            """,
+            (chunk_ids,),
+        ).fetchall()
+        keys = (
+            "chunk_id",
+            "rcept_no",
+            "corp_name",
+            "report_nm",
+            "report_kind",
+            "period_key",
+            "rcept_dt",
+            "kind",
+            "section_path",
+            "body",
+            "unit",
+        )
+        out = {}
+        for r in rows:
+            d = dict(zip(keys, r, strict=True))
+            d["section_path"] = list(d["section_path"])
+            d["url"] = f"https://dart.fss.or.kr/dsaf001/main.do?rcpNo={d['rcept_no']}"
+            out[d["chunk_id"]] = d
+        return out

@@ -11,9 +11,11 @@ dependencies = [
   "boto3>=1.34",
   "lxml>=5.2",
   "typer>=0.12",
+  "qdrant-client>=1.19",
 ]
 
 [project.optional-dependencies]
+embed = ["sentence-transformers>=3.0"]
 dev = ["pytest>=8", "respx>=0.21", "ruff>=0.5"]
 
 [project.scripts]
@@ -29,6 +31,8 @@ packages = ["src/dartrag"]
 [tool.pytest.ini_options]
 pythonpath = ["src"]
 testpaths = ["tests"]
+# 테스트용 로컬(:memory:) Qdrant 는 페이로드 인덱스를 무시한다는 경고
+filterwarnings = ["ignore:Payload indexes have no effect"]
 
 [tool.ruff]
 line-length = 100
