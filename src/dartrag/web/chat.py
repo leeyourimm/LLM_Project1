@@ -91,6 +91,8 @@ def build_router(services, CurrentUser, corp_codes: Callable) -> APIRouter:  # n
         cited = {c.number for c in result.citations}
         payload = {
             "found": result.found,
+            "refused": result.refused,
+            "cached": result.cached,
             "warnings": result.warnings,
             "unverified_numbers": result.unverified,
             "sources": _sources(result.hits, cited),

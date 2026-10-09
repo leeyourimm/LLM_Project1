@@ -20,7 +20,7 @@ def repo():
     conn.execute(
         "DROP TABLE IF EXISTS feedback, messages, conversations, sessions, user_watchlist, "
         "users, notifications, watchlist, disclosures, chunks, financial_items, filings, "
-        "companies CASCADE"
+        "companies, app_state CASCADE"
     )
     conn.commit()
     r = Repository(conn)
@@ -347,3 +347,31 @@ def test_conversations_messages_feedback(repo):
     assert repo.purge_conversations(30) == 0
     assert repo.delete_conversation(mine, None) and repo.feedback_rows() == []
     assert not repo.delete_conversation(theirs, None)
+
+
+def test_expand_chunks_and_data_version(repo):
+    from dartrag.parsing import Chunk
+
+    repo.upsert_companies([Corp(corp_code="00126380", corp_name="삼성전자", stock_code="005930")])
+    filing = Filing(
+        corp_code="00126380",
+        corp_name="삼성전자",
+        report_nm="사업보고서 (2024.12)",
+        rcept_no="20250311000001",
+        rcept_dt=date(2025, 3, 11),
+    )
+    repo.upsert_filing(filing, parse_report_name(filing.report_nm), "11011", "documents/x.zip")
+    chunks = [Chunk(f"c{i}", "text", ["II. 사업"], "ctx", f"문단{i}", i) for i in range(4)]
+    chunks.append(Chunk("other", "text", ["III. 재무"], "ctx", "다른 섹션", 4))
+    repo.replace_chunks("20250311000001", "00126380", [("a.xml", chunks)], 1)
+
+    wide = repo.expand_chunks(["c1", "c3", "other"])
+    assert wide["c1"] == "문단0\n문단1\n문단2"
+    assert wide["c3"] == "문단2\n문단3"  # 다른 섹션은 붙이지 않음
+    assert "other" not in wide  # 이웃이 없으면 넓히지 않음
+    assert repo.expand_chunks(["c1"], max_chars=8) == {"c1": "문단0\n문단1"}
+
+    assert repo.data_version() == 0
+    repo.mark_indexed("20250311000001", 1, "m")
+    repo.replace_financials("00126380", 2024, "11011", "CFS", [])
+    assert repo.data_version() == 2

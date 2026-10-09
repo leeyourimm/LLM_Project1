@@ -114,6 +114,7 @@ class Repository:
                 """,
                 items,
             )
+            self._bump_data_version(cur)
         return len(items)
 
     def filings_to_parse(self, parser_version: int, corp_codes: list[str] | None = None):
@@ -223,7 +224,58 @@ class Repository:
                WHERE rcept_no = %s""",
             (index_version, index_model, rcept_no),
         )
+        self._bump_data_version(self.conn)
         self.conn.commit()
+
+    # --- 데이터 버전 (답변 캐시 무효화용) ----------------------------------
+
+    @staticmethod
+    def _bump_data_version(executor) -> None:
+        executor.execute(
+            """INSERT INTO app_state (key, value) VALUES ('data_version', 1)
+               ON CONFLICT (key) DO UPDATE SET value = app_state.value + 1, updated_at = now()"""
+        )
+
+    def data_version(self) -> int:
+        row = self.conn.execute("SELECT value FROM app_state WHERE key = 'data_version'").fetchone()
+        return row[0] if row else 0
+
+    def expand_chunks(
+        self, chunk_ids: list[str], window: int = 1, max_chars: int = 3000
+    ) -> dict[str, str]:
+        """같은 섹션의 앞뒤 청크를 붙인 넓은 맥락 (검색은 작게, 답변 근거는 넓게)."""
+        rows = self.conn.execute(
+            """
+            SELECT c.chunk_id, c.ord, n.ord, n.body
+            FROM chunks c
+            JOIN chunks n ON n.rcept_no = c.rcept_no AND n.source_file = c.source_file
+                 AND n.section_path = c.section_path
+                 AND n.ord BETWEEN c.ord - %s AND c.ord + %s
+            WHERE c.chunk_id = ANY(%s)
+            ORDER BY c.chunk_id, n.ord
+            """,
+            (window, window, chunk_ids),
+        ).fetchall()
+        groups: dict[str, list[tuple[int, int, str]]] = {}
+        for cid, center, ord_, body in rows:
+            groups.setdefault(cid, []).append((center, ord_, body))
+        out = {}
+        for cid, parts in groups.items():
+            if len(parts) < 2:
+                continue
+            center = parts[0][0]
+            by_ord = {o: b for _, o, b in parts}
+            keep = [center]
+            size = len(by_ord[center])
+            # 가까운 것부터 붙이고 max_chars 를 넘기면 멈춘다
+            for o in sorted(by_ord, key=lambda o: (abs(o - center), o)):
+                if o == center or size + len(by_ord[o]) > max_chars:
+                    continue
+                keep.append(o)
+                size += len(by_ord[o])
+            if len(keep) > 1:
+                out[cid] = "\n".join(by_ord[o] for o in sorted(keep))
+        return out
 
     def get_chunks(self, chunk_ids: list[str]) -> dict[str, dict]:
         """검색 결과에 붙일 청크 본문과 출처."""

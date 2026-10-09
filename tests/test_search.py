@@ -117,6 +117,92 @@ def test_hybrid_fuses_and_loads_chunks(vector):
     assert keyword.calls[0][1].corp_codes == ["00126380"]
 
 
+class FixedDense:
+    def __init__(self, by_corp):
+        self.by_corp = by_corp
+        self.calls = []
+
+    def search(self, vector, flt, limit):
+        self.calls.append(flt.corp_codes)
+        if len(flt.corp_codes) == 1:
+            return self.by_corp[flt.corp_codes[0]]
+        return [c for ids in self.by_corp.values() for c in ids]
+
+
+def loader(chunks):
+    return lambda ids: {i: dict(chunks[i]) for i in ids if i in chunks}
+
+
+def test_hybrid_splits_multi_company_questions():
+    dense = FixedDense({"A": ["a1", "a2", "a3", "a4"], "B": ["b1", "b2"]})
+    chunks = {c: {"body": c, "period_key": "2024.12"} for c in ["a1", "a2", "a3", "a4", "b1", "b2"]}
+    retriever = HybridRetriever(FakeEmbedder(), dense, FakeKeyword([]), loader(chunks))
+    hits = retriever.search("비교", SearchFilter(corp_codes=["A", "B"]), limit=4)
+    assert [h.chunk_id for h in hits] == ["a1", "b1", "a2", "b2"]  # 회사별로 번갈아
+    assert dense.calls == [["A"], ["B"]]
+
+
+def test_hybrid_dedupes_repeated_paragraphs_and_prefers_recent():
+    chunks = {
+        "old": {"body": "회사는  반도체 사업을 한다", "period_key": "2022.12"},
+        "new": {"body": "회사는 반도체 사업을 한다", "period_key": "2024.12"},
+        "mid": {"body": "다른 문단", "period_key": "2023.12"},
+    }
+    dense = FixedDense({"A": ["old", "mid", "new"]})
+    retriever = HybridRetriever(FakeEmbedder(), dense, FakeKeyword([]), loader(chunks))
+    hits = retriever.search("반도체", SearchFilter(corp_codes=["A"]), limit=5)
+    assert [h.chunk_id for h in hits] == ["new", "mid"]
+    assert hits[0].duplicates == 1
+
+
+class FakeReranker:
+    name = "fake"
+
+    def __init__(self):
+        self.texts = []
+
+    def score(self, query, texts):
+        self.texts = texts
+        return [0.9 if "정답" in t else 0.1 for t in texts]
+
+
+def test_hybrid_reranks_and_expands_context():
+    chunks = {
+        "x": {"body": "관계없는 글", "period_key": "2024.12", "corp_name": "삼성전자"},
+        "y": {"body": "정답이 있는 글", "period_key": "2024.12", "corp_name": "삼성전자"},
+    }
+    rr = FakeReranker()
+    retriever = HybridRetriever(
+        FakeEmbedder(),
+        FixedDense({"A": ["x", "y"]}),
+        FakeKeyword([]),
+        loader(chunks),
+        reranker=rr,
+        expand=lambda ids: {"y": "앞 문단\n정답이 있는 글\n뒤 문단"},
+    )
+    hits = retriever.search("질문", SearchFilter(corp_codes=["A"]), limit=2)
+    assert [h.chunk_id for h in hits] == ["y", "x"] and hits[0].rerank_score == 0.9
+    assert rr.texts[0].startswith("삼성전자")
+    assert (
+        hits[0].chunk["context_body"].startswith("앞 문단") and "context_body" not in hits[1].chunk
+    )
+
+
+def test_recency_breaks_ties():
+    chunks = {
+        "old": {"body": "a", "period_key": "2020.12"},
+        "new": {"body": "b", "period_key": "2024.12"},
+    }
+    retriever = HybridRetriever(
+        FakeEmbedder(), FixedDense({"A": ["old"]}), FakeKeyword(["new"]), loader(chunks)
+    )
+    # 두 청크 모두 한쪽 검색에서만 1위라 RRF 점수가 같다 → 최신이 앞
+    assert [h.chunk_id for h in retriever.search("q", SearchFilter(corp_codes=["A"]))] == [
+        "new",
+        "old",
+    ]
+
+
 BASE = "http://os:9200"
 
 

@@ -116,6 +116,23 @@ def check_opensearch(settings: Settings, http: httpx.Client) -> Check:
     return Check(name, True, "연결, 한국어 분석기 정상")
 
 
+def check_redis(settings: Settings, connect: Callable | None = None) -> Check:
+    name = "Redis (답변 캐시·작업 큐)"
+    if not settings.redis_url:
+        return Check(name, True, "사용 안 함 (REDIS_URL 비어 있음)", required=False)
+    try:
+        if connect is None:
+            import redis
+
+            connect = redis.Redis.from_url
+        connect(settings.redis_url, socket_connect_timeout=3).ping()
+    except Exception as e:  # noqa: BLE001
+        return Check(
+            name, False, f"연결 실패 ({type(e).__name__}){DOCKER_HINT}", "make up", required=False
+        )
+    return Check(name, True, "연결 정상", required=False)
+
+
 def check_embedding_package(find_spec: Callable = importlib.util.find_spec) -> Check:
     if find_spec("sentence_transformers") is None:
         return Check("임베딩 라이브러리", False, "설치되지 않았습니다", 'pip install -e ".[embed]"')
@@ -159,6 +176,7 @@ def run_checks(settings: Settings, http: httpx.Client | None = None, *, online: 
             check_postgres(settings),
             check_qdrant(settings, http),
             check_opensearch(settings, http),
+            check_redis(settings),
             check_embedding_package(),
             check_ollama(settings, http),
             check_disk(),

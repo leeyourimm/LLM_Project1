@@ -101,3 +101,16 @@ def test_run_stops_when_not_ready_and_summarizes(monkeypatch):
     calls.clear()
     r = CliRunner().invoke(cli.app, ["run", "--eval-limit", "0"])
     assert r.exit_code == 0 and len(calls) == 4
+
+
+def test_redis_check():
+    class Ok:
+        def ping(self):
+            return True
+
+    def down(url, **kw):
+        raise ConnectionError
+
+    assert doctor.check_redis(S, lambda url, **kw: Ok()).ok
+    c = doctor.check_redis(S, down)
+    assert not c.ok and not c.required and c.fix == "make up"
