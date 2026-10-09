@@ -5,6 +5,7 @@
 """
 
 import importlib.util
+import re
 import shutil
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -48,27 +49,91 @@ def check_env_file(settings: Settings, env_path: Path = Path(".env")) -> Check:
     return Check(".env 파일", True, "인증키 있음")
 
 
+DART_API = "https://opendart.fss.or.kr/api"
+SAMSUNG = "00126380"
+
+
+def _dart_status(head: bytes) -> str | None:
+    """응답 앞부분에서 OpenDART 상태 코드. 압축 파일(원문, 회사 목록)이면 None (정상)."""
+    if head.startswith(b"PK"):
+        return None
+    m = re.search(rb'"status"\s*:\s*"(\d{3})"|<status>(\d{3})</status>', head)
+    if not m:
+        return "900"
+    return (m.group(1) or m.group(2)).decode()
+
+
+def _probe(http: httpx.Client, path: str, params: dict) -> tuple[str | None, bytes]:
+    """요청 하나를 보내고 앞부분만 읽는다 (원문·회사 목록은 수 MB 라 끝까지 받지 않는다)."""
+    head = b""
+    with http.stream("GET", f"{DART_API}/{path}", params=params, timeout=15) as resp:
+        resp.raise_for_status()
+        for chunk in resp.iter_bytes():
+            head += chunk
+            if len(head) >= 4096:
+                break
+    return _dart_status(head), head
+
+
 def check_opendart(settings: Settings, http: httpx.Client) -> Check:
+    """수집이 쓰는 기능을 모두 확인한다.
+
+    점검 때는 공시 검색만 열어 두고 회사 목록·원문·재무제표 받기를 막기도 해서, 공시 검색 하나만
+    보면 수집이 바로 멈추는데도 정상으로 나온다."""
     name = "OpenDART 연결"
     if not settings.dart_api_key:
         return Check(name, False, "인증키가 없어 건너뜀", "위의 .env 파일부터 고치세요")
-    end = date.today()
-    params = {
-        "crtfc_key": settings.dart_api_key,
-        "corp_code": "00126380",
-        "bgn_de": (end - timedelta(days=7)).strftime("%Y%m%d"),
-        "end_de": end.strftime("%Y%m%d"),
-        "page_count": 1,
-    }
+    key = {"crtfc_key": settings.dart_api_key}
+    today = date.today()
+    probes = [
+        (
+            "공시 검색",
+            "list.json",
+            {
+                "corp_code": SAMSUNG,
+                "bgn_de": (today - timedelta(days=365)).strftime("%Y%m%d"),
+                "end_de": today.strftime("%Y%m%d"),
+                "pblntf_ty": "A",
+                "page_count": 1,
+            },
+        ),
+        ("회사 목록 받기", "corpCode.xml", {}),
+        (
+            "재무제표 받기",
+            "fnlttSinglAcntAll.json",
+            {
+                "corp_code": SAMSUNG,
+                "bsns_year": str(today.year - 2),
+                "reprt_code": "11011",
+                "fs_div": "CFS",
+            },
+        ),
+    ]
+    rcept_no = None
     try:
-        resp = http.get("https://opendart.fss.or.kr/api/list.json", params=params, timeout=15)
-        status = resp.json().get("status")
-    except (httpx.HTTPError, ValueError) as e:
+        for label, path, params in probes:
+            status, head = _probe(http, path, key | params)
+            if status not in (None, "000", "013"):
+                return _dart_failure(name, label, status)
+            if path == "list.json":
+                m = re.search(rb'"rcept_no"\s*:\s*"(\d{14})"', head)
+                rcept_no = m.group(1).decode() if m else None
+        if rcept_no:
+            status, _ = _probe(http, "document.xml", key | {"rcept_no": rcept_no})
+            if status not in (None, "000", "013"):
+                return _dart_failure(name, "공시 원문 받기", status)
+    except httpx.HTTPError as e:
         return Check(name, False, f"연결 실패 ({type(e).__name__})", "인터넷 연결을 확인하세요")
-    if status in ("000", "013"):
-        return Check(name, True, "인증키 정상")
+    return Check(name, True, "인증키 정상, 수집에 쓰는 기능 모두 응답")
+
+
+def _dart_failure(name: str, label: str, status: str) -> Check:
     message = DART_KEY_ERRORS.get(status, f"오류 코드 {status}")
-    return Check(name, False, message, "https://opendart.fss.or.kr 에서 인증키 상태를 확인하세요")
+    if status == "800":
+        fix = "점검이 끝난 뒤 dartrag doctor 를 다시 실행하세요"
+    else:
+        fix = "https://opendart.fss.or.kr 에서 인증키 상태를 확인하세요"
+    return Check(name, False, f"{label}: {message}", fix)
 
 
 def check_postgres(settings: Settings, connect: Callable | None = None) -> Check:
