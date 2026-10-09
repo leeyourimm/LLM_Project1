@@ -1,3 +1,4 @@
+import json
 from contextlib import contextmanager
 from datetime import UTC, date, datetime
 
@@ -30,6 +31,9 @@ class FakeRepo:
         self.watch = {}
         self.users = {}
         self.sessions = {}
+        self.convs = {}
+        self.msg_seq = 0
+        self.feedback = {}
         self.closed = False
 
     def corp_codes_for_stocks(self, stocks):
@@ -118,11 +122,74 @@ class FakeRepo:
     def latest_filing_per_period(self, corp_code, kind):
         return ["old", "new"]
 
+    def listed_companies(self):
+        return [("00126380", "삼성전자"), ("00164779", "SK하이닉스")]
+
+    # 대화 기록
+    def create_conversation(self, user_id, title):
+        cid = len(self.convs) + 1
+        self.convs[cid] = {"user_id": user_id, "title": title, "messages": []}
+        return cid
+
+    def owns_conversation(self, cid, user_id):
+        return cid in self.convs and self.convs[cid]["user_id"] == user_id
+
+    def add_message(self, cid, role, content, payload):
+        self.msg_seq += 1
+        self.convs[cid]["messages"].append(
+            {"id": self.msg_seq, "role": role, "content": content, "payload": payload}
+        )
+        return self.msg_seq
+
+    def conversations(self, user_id):
+        return [
+            {"id": i, "title": c["title"]} for i, c in self.convs.items() if c["user_id"] == user_id
+        ]
+
+    def messages(self, cid):
+        return self.convs[cid]["messages"]
+
+    def last_context(self, cid):
+        users = [m for m in self.convs[cid]["messages"] if m["role"] == "user"]
+        return users[-1]["payload"]["context"] if users else None
+
+    def delete_conversation(self, cid, user_id):
+        if not self.owns_conversation(cid, user_id):
+            return False
+        del self.convs[cid]
+        return True
+
+    def set_feedback(self, message_id, user_id, rating, reason, comment):
+        for c in self.convs.values():
+            for m in c["messages"]:
+                if m["id"] == message_id and m["role"] == "assistant" and c["user_id"] == user_id:
+                    self.feedback[message_id] = (rating, reason, comment)
+                    return True
+        return False
+
+
+class FakeLLM:
+    name = "fake-llm"
+
 
 class FakeAnswerer:
+    llm = FakeLLM()
+
     def __init__(self, fail=False):
         self.fail = fail
         self.calls = []
+
+    def stream(self, question, flt):
+        self.calls.append((question, flt))
+        yield ("sources", [HIT])
+        if self.fail:
+            raise LLMError("Ollama 에 연결할 수 없습니다.")
+        yield ("token", "DS 매출은 ")
+        yield ("token", "111조원입니다 [1].")
+        yield (
+            "done",
+            check_citations(Answer(question, "DS 매출은 111조원입니다 [1].", hits=[HIT])),
+        )
 
     def answer(self, question, flt):
         self.calls.append((question, flt))
@@ -384,3 +451,90 @@ def test_password_hashing():
     assert lim.blocked("1.1.1.1", "a") and not lim.blocked("2.2.2.2", "b")
     now[0] = 61
     assert not lim.blocked("1.1.1.1", "a")
+
+
+def sse_events(text):
+    out = []
+    for block in text.strip().split("\n\n"):
+        lines = dict(line.split(": ", 1) for line in block.splitlines())
+        out.append((lines["event"], json.loads(lines["data"])))
+    return out
+
+
+def test_conversation_follow_up_and_history(ctx):
+    client, repo, answerer = ctx
+    first = client.post("/api/ask", json={"question": "삼성전자 2024년 영업이익은?"}).json()
+    cid = first["conversation_id"]
+    assert first["question"] == "삼성전자 2024년 영업이익은?" and first["model"] == "fake-llm"
+    assert answerer.calls[-1][1].corp_codes == ["00126380"]  # 질문 속 회사로 검색을 좁힘
+
+    second = client.post("/api/ask", json={"question": "그럼 전년은?", "conversation_id": cid})
+    body = second.json()
+    assert body["conversation_id"] == cid and body["question"] == "삼성전자 2023년 영업이익?"
+    assert body["inherited"] == ["회사", "주제"]
+    assert answerer.calls[-1][0] == "삼성전자 2023년 영업이익?"
+
+    convs = client.get("/api/conversations").json()
+    assert convs == [{"id": cid, "title": "삼성전자 2024년 영업이익은?"}]
+    msgs = client.get(f"/api/conversations/{cid}").json()["messages"]
+    assert [m["role"] for m in msgs] == ["user", "assistant", "user", "assistant"]
+    assert msgs[1]["payload"]["sources"][0]["cited"] is True
+
+    assert (
+        client.post("/api/ask", json={"question": "x 질문", "conversation_id": 99}).status_code
+        == 404
+    )
+    assert client.delete(f"/api/conversations/{cid}").status_code == 200
+    assert client.get(f"/api/conversations/{cid}").status_code == 404
+
+
+def test_ask_stream(ctx):
+    client, *_ = ctx
+    r = client.post("/api/ask/stream", json={"question": "삼성전자 DS 매출은?"})
+    assert r.headers["content-type"].startswith("text/event-stream")
+    events = sse_events(r.text)
+    assert [e for e, _ in events] == ["meta", "sources", "token", "token", "done"]
+    assert "".join(d["text"] for e, d in events if e == "token") == "DS 매출은 111조원입니다 [1]."
+    done = events[-1][1]
+    assert done["message_id"] and done["sources"][0]["cited"] is True
+    assert "투자 권유" in done["disclaimer"]
+
+
+def test_ask_stream_llm_error():
+    repo = FakeRepo()
+
+    @contextmanager
+    def repo_cm():
+        yield repo
+
+    client = TestClient(create_app(Services(repo_cm, lambda r: FakeAnswerer(fail=True), None)))
+    events = sse_events(client.post("/api/ask/stream", json={"question": "매출은?"}).text)
+    assert events[-1][0] == "error" and "Ollama" in events[-1][1]["detail"]
+
+
+def test_feedback(ctx):
+    client, repo, _ = ctx
+    r = client.post("/api/ask", json={"question": "삼성전자 매출은?"}).json()
+    mid = r["message_id"]
+    ok = client.post(
+        f"/api/messages/{mid}/feedback",
+        json={"rating": -1, "reason": "wrong_number", "comment": "단위가 틀림"},
+    )
+    assert ok.status_code == 200 and repo.feedback[mid] == (-1, "wrong_number", "단위가 틀림")
+    assert client.post(f"/api/messages/{mid}/feedback", json={"rating": 5}).status_code == 422
+    bad = client.post(f"/api/messages/{mid}/feedback", json={"rating": 1, "reason": "x"})
+    assert bad.status_code == 422
+    # 질문 메시지나 없는 메시지에는 평가할 수 없음
+    assert client.post(f"/api/messages/{mid - 1}/feedback", json={"rating": 1}).status_code == 404
+
+
+def test_conversations_are_private(secure):
+    client, *_ = secure
+    client.post("/api/auth/signup", json={"email": "a@b.co", "password": PW})
+    cid = client.post("/api/ask", json={"question": "삼성전자 매출은?"}).json()["conversation_id"]
+    other = TestClient(client.app)
+    other.post("/api/auth/signup", json={"email": "c@d.co", "password": PW})
+    assert other.get(f"/api/conversations/{cid}").status_code == 404
+    assert other.get("/api/conversations").json() == []
+    r = other.post("/api/ask", json={"question": "그럼 전년은?", "conversation_id": cid})
+    assert r.status_code == 404

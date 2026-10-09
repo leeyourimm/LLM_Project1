@@ -129,3 +129,46 @@ def test_answer_flags_numbers_missing_from_cited_source():
 
     ok = Answerer(FakeRetriever(hits), FakeLLM("배당 총액은 9.8조원입니다 [2].")).answer("q")
     assert ok.unverified == [] and ok.warnings == []
+
+
+@respx.mock
+def test_ollama_stream():
+    lines = [
+        {"message": {"content": "DS 매출은 "}, "done": False},
+        {"message": {"content": "111조원 [1]."}, "done": False},
+        {"message": {"content": ""}, "done": True},
+    ]
+    route = respx.post(f"{URL}/api/chat").mock(
+        return_value=httpx.Response(200, text="\n".join(json.dumps(x) for x in lines))
+    )
+    pieces = list(OllamaLLM("qwen3:8b", URL).stream([Message("user", "q")]))
+    assert pieces == ["DS 매출은 ", "111조원 [1]."]
+    assert json.loads(route.calls[0].request.content)["stream"] is True
+
+    respx.post(f"{URL}/api/chat").mock(return_value=httpx.Response(404, json={"error": "x"}))
+    with pytest.raises(LLMError, match="ollama pull"):
+        list(OllamaLLM("qwen3:8b", URL).stream([Message("user", "q")]))
+    respx.post(f"{URL}/api/chat").mock(
+        return_value=httpx.Response(200, text=json.dumps({"error": "out of memory"}))
+    )
+    with pytest.raises(LLMError, match="out of memory"):
+        list(OllamaLLM("qwen3:8b", URL).stream([Message("user", "q")]))
+
+
+class StreamLLM(FakeLLM):
+    def stream(self, messages):
+        self.messages = messages
+        yield from ["DS 매출은 ", "111조원입니다 [1]."]
+
+
+def test_answerer_stream_events():
+    events = list(Answerer(FakeRetriever(HITS), StreamLLM("")).stream("DS 매출은?"))
+    kinds = [k for k, _ in events]
+    assert kinds == ["sources", "token", "token", "done"]
+    done = events[-1][1]
+    assert done.text == "DS 매출은 111조원입니다 [1]." and done.citations[0].number == 1
+    # 스트리밍을 못 하는 모델도 같은 순서로 동작
+    events = list(Answerer(FakeRetriever(HITS), FakeLLM("답 [2]")).stream("배당은?"))
+    assert [k for k, _ in events] == ["sources", "token", "done"]
+    events = list(Answerer(FakeRetriever([]), StreamLLM("")).stream("없는 것"))
+    assert events[0][0] == "done" and events[0][1].found is False

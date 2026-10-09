@@ -16,17 +16,11 @@ from pydantic import BaseModel, Field
 
 from dartrag.search import SearchFilter
 from dartrag.web import auth
+from dartrag.web.chat import DISCLAIMER, build_router
+from dartrag.web.chat import source_dict as _source
 from dartrag.web.services import Services
 
 STATIC = pathlib.Path(__file__).parent / "static"
-DISCLAIMER = "공시 정보 요약이며 투자 권유가 아닙니다. 중요한 판단은 원문을 확인하세요."
-
-
-class AskRequest(BaseModel):
-    question: str = Field(min_length=2, max_length=500)
-    stocks: list[str] = Field(default_factory=list, max_length=5)
-    year_from: int | None = None
-    year_to: int | None = None
 
 
 class Credentials(BaseModel):
@@ -61,21 +55,6 @@ UNSAFE_METHODS = {"POST", "PUT", "PATCH", "DELETE"}
 class WatchRequest(BaseModel):
     stock: str = Field(pattern=r"^\d{6}$")
     min_importance: int = Field(2, ge=1, le=3)
-
-
-def _source(number: int | None, hit) -> dict:
-    c = hit.chunk
-    return {
-        "number": number,
-        "chunk_id": hit.chunk_id,
-        "corp_name": c.get("corp_name"),
-        "report_nm": c.get("report_nm"),
-        "section": " > ".join(c.get("section_path", [])),
-        "kind": c.get("kind"),
-        "body": c.get("body", ""),
-        "unit": c.get("unit"),
-        "url": c.get("url"),
-    }
 
 
 def create_app(services: Services, limiter: auth.LoginLimiter | None = None) -> FastAPI:
@@ -225,33 +204,6 @@ def create_app(services: Services, limiter: auth.LoginLimiter | None = None) -> 
                 for c, n, s in repo.listed_companies_with_stock()
             ]
 
-    @api.post("/api/ask")
-    def ask(req: AskRequest):
-        from dartrag.answer import LLMError
-
-        with services.repo() as repo:
-            flt = SearchFilter(
-                corp_codes=corp_codes(repo, req.stocks),
-                year_from=req.year_from,
-                year_to=req.year_to,
-            )
-            try:
-                result = services.answerer(repo).answer(req.question, flt)
-            except LLMError as e:
-                raise HTTPException(503, str(e)) from None
-        cited = {c.number for c in result.citations}
-        return {
-            "question": result.question,
-            "answer": result.text,
-            "found": result.found,
-            "warnings": result.warnings,
-            "unverified_numbers": result.unverified,
-            "sources": [
-                _source(i, h) | {"cited": i in cited} for i, h in enumerate(result.hits, start=1)
-            ],
-            "disclaimer": DISCLAIMER,
-        }
-
     @api.get("/api/search")
     def search(
         q: Annotated[str, Query(min_length=2, max_length=500)],
@@ -373,6 +325,7 @@ def create_app(services: Services, limiter: auth.LoginLimiter | None = None) -> 
             "disclaimer": DISCLAIMER,
         }
 
+    api.include_router(build_router(services, CurrentUser, corp_codes))
     app.include_router(api)
     app.mount("/static", StaticFiles(directory=STATIC), name="static")
 
