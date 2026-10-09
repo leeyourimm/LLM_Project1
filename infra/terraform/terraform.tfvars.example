@@ -1,0 +1,28 @@
+# 이 파일을 terraform.tfvars로 복사해서 값을 고치세요(terraform.tfvars는 git에 올라가지 않습니다).
+# 비밀값(API 키, 비밀번호)은 여기에 넣지 않습니다. 서버의 infra/prod/.env에 직접 입력합니다.
+
+aws_region        = "ap-northeast-2"
+availability_zone = "ap-northeast-2a"
+project           = "dartrag"
+
+# 메모리 16GB 이상. 더 싸게: "r7i.large"(답변이 느려짐)
+instance_type       = "m7i.xlarge"
+root_volume_size_gb = 30
+data_volume_size_gb = 100
+
+repo_url = "https://github.com/leeyourimm/LLM_Project1.git"
+git_ref  = "main"
+
+# SSH는 기본으로 닫혀 있습니다. SSM Session Manager 접속을 권장합니다.
+# 꼭 SSH를 써야 하면 내 IP만 허용하세요.
+# ssh_allowed_cidrs = ["203.0.113.10/32"]
+# ssh_key_name      = "my-key"
+
+backup_retention_days = 30
+
+# 선택: 도메인 A 레코드
+# domain_name    = "dart.example.com"
+# hosted_zone_id = "Z0123456789ABCDEFGHIJ"
+
+# 선택: 서버 상태 검사 실패 알림 메일
+# alarm_email = "me@example.com"
