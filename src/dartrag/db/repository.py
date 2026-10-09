@@ -311,3 +311,89 @@ class Repository:
             (corp_code, report_kind),
         ).fetchall()
         return [r[0] for r in rows]
+
+    def insert_disclosures(self, rows: list[dict]) -> list[str]:
+        """새 공시만 넣고, 새로 들어간 접수번호를 돌려준다."""
+        new: list[str] = []
+        with self.conn.transaction(), self.conn.cursor() as cur:
+            for r in rows:
+                cur.execute(
+                    """
+                    INSERT INTO disclosures (rcept_no, corp_code, corp_name, stock_code, corp_cls,
+                        report_nm, flr_nm, rcept_dt, rm, pblntf_ty, event_type, event_label,
+                        importance, correction)
+                    VALUES (%(rcept_no)s, %(corp_code)s, %(corp_name)s, %(stock_code)s,
+                        %(corp_cls)s, %(report_nm)s, %(flr_nm)s, %(rcept_dt)s, %(rm)s,
+                        %(pblntf_ty)s, %(event_type)s, %(event_label)s, %(importance)s,
+                        %(correction)s)
+                    ON CONFLICT (rcept_no) DO NOTHING
+                    RETURNING rcept_no
+                    """,
+                    r,
+                )
+                if cur.fetchone():
+                    new.append(r["rcept_no"])
+        return new
+
+    def recent_disclosures(
+        self, since, min_importance: int = 1, corp_codes: list[str] | None = None
+    ) -> list[dict]:
+        query = """
+            SELECT rcept_no, corp_code, corp_name, stock_code, report_nm, rcept_dt,
+                   event_label, importance, correction
+            FROM disclosures WHERE rcept_dt >= %s AND importance >= %s
+        """
+        params: list = [since, min_importance]
+        if corp_codes:
+            query += " AND corp_code = ANY(%s)"
+            params.append(corp_codes)
+        query += " ORDER BY rcept_dt DESC, importance DESC, rcept_no DESC"
+        cur = self.conn.execute(query, params)
+        cols = [c.name for c in cur.description]
+        return [dict(zip(cols, r, strict=True)) for r in cur.fetchall()]
+
+    def set_watch(self, corp_code: str, min_importance: int) -> None:
+        self.conn.execute(
+            """INSERT INTO watchlist (corp_code, min_importance) VALUES (%s, %s)
+               ON CONFLICT (corp_code) DO UPDATE SET min_importance = EXCLUDED.min_importance""",
+            (corp_code, min_importance),
+        )
+        self.conn.commit()
+
+    def remove_watch(self, corp_code: str) -> bool:
+        cur = self.conn.execute("DELETE FROM watchlist WHERE corp_code = %s", (corp_code,))
+        self.conn.commit()
+        return cur.rowcount > 0
+
+    def watchlist(self) -> list[tuple[str, str, str | None, int]]:
+        return self.conn.execute(
+            """SELECT w.corp_code, COALESCE(c.corp_name, w.corp_code), c.stock_code,
+                      w.min_importance
+               FROM watchlist w LEFT JOIN companies c USING (corp_code)
+               ORDER BY c.corp_name"""
+        ).fetchall()
+
+    def pending_alerts(self, channel: str) -> list[dict]:
+        """관심 종목의 기준 이상 공시 중 이 채널로 아직 안 보낸 것."""
+        cur = self.conn.execute(
+            """
+            SELECT d.rcept_no, d.corp_name, d.report_nm, d.rcept_dt, d.event_label,
+                   d.importance, d.correction
+            FROM disclosures d
+            JOIN watchlist w ON w.corp_code = d.corp_code AND d.importance >= w.min_importance
+            WHERE d.seen_at >= w.added_at
+              AND NOT EXISTS (SELECT 1 FROM notifications n
+                              WHERE n.rcept_no = d.rcept_no AND n.channel = %s)
+            ORDER BY d.rcept_dt, d.rcept_no
+            """,
+            (channel,),
+        )
+        cols = [c.name for c in cur.description]
+        return [dict(zip(cols, r, strict=True)) for r in cur.fetchall()]
+
+    def mark_notified(self, rcept_no: str, channel: str) -> None:
+        self.conn.execute(
+            "INSERT INTO notifications (rcept_no, channel) VALUES (%s, %s) ON CONFLICT DO NOTHING",
+            (rcept_no, channel),
+        )
+        self.conn.commit()

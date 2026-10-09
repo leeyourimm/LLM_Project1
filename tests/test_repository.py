@@ -17,7 +17,10 @@ pytestmark = pytest.mark.skipif(not URL, reason="TEST_DATABASE_URL 없음")
 @pytest.fixture
 def repo():
     conn = psycopg.connect(URL)
-    conn.execute("DROP TABLE IF EXISTS chunks, financial_items, filings, companies CASCADE")
+    conn.execute(
+        "DROP TABLE IF EXISTS notifications, watchlist, disclosures, chunks, financial_items, "
+        "filings, companies CASCADE"
+    )
     conn.commit()
     r = Repository(conn)
     r.migrate()
@@ -229,3 +232,45 @@ def test_filing_pairs_for_diff(repo):
     assert info["corp_name"] == "삼성전자" and info["parsed"] is True
     assert repo.filing_info("00000000000000") is None
     assert repo.chunk_rows("20250311000001") == [("20250311000001.xml", 0, ["I. 개요"], "body")]
+
+
+def test_disclosures_watchlist_and_alerts(repo):
+    repo.upsert_companies([Corp(corp_code="00126380", corp_name="삼성전자", stock_code="005930")])
+
+    def d(no, importance, corp="00126380"):
+        return {
+            "rcept_no": f"2025031100000{no}",
+            "corp_code": corp,
+            "corp_name": "삼성전자",
+            "stock_code": "005930",
+            "corp_cls": "Y",
+            "report_nm": "보고서",
+            "flr_nm": None,
+            "rcept_dt": date(2025, 3, 11),
+            "rm": None,
+            "pblntf_ty": "B",
+            "event_type": "x",
+            "event_label": "라벨",
+            "importance": importance,
+            "correction": False,
+        }
+
+    # 관심 종목 등록 전에 본 공시는 알림하지 않는다
+    assert repo.insert_disclosures([d(1, 3)]) == ["20250311000001"]
+    repo.set_watch("00126380", 2)
+    assert repo.pending_alerts("webhook") == []
+
+    assert repo.insert_disclosures([d(1, 3), d(2, 3), d(3, 1), d(4, 3, corp="99999999")]) == [
+        "20250311000002",
+        "20250311000003",
+        "20250311000004",
+    ]
+    assert [a["rcept_no"] for a in repo.pending_alerts("webhook")] == ["20250311000002"]
+    repo.mark_notified("20250311000002", "webhook")
+    assert repo.pending_alerts("webhook") == []
+    assert len(repo.pending_alerts("console")) == 1  # 채널별로 따로 기록
+
+    assert repo.watchlist() == [("00126380", "삼성전자", "005930", 2)]
+    rows = repo.recent_disclosures(date(2025, 3, 1), 2, ["00126380"])
+    assert [r["rcept_no"] for r in rows] == ["20250311000002", "20250311000001"]
+    assert repo.remove_watch("00126380") and not repo.remove_watch("00126380")

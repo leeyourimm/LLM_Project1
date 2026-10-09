@@ -241,6 +241,123 @@ def diff(
         typer.echo(text)
 
 
+feed_app = typer.Typer(help="주요 공시 피드와 알림")
+app.add_typer(feed_app, name="feed")
+watch_app = typer.Typer(help="알림 받을 관심 종목")
+app.add_typer(watch_app, name="watch")
+
+
+def _notifier(settings):
+    from dartrag.feed.notify import ConsoleNotifier, WebhookNotifier
+
+    if settings.alert_webhook_url:
+        return WebhookNotifier(settings.alert_webhook_url)
+    return ConsoleNotifier(typer.echo)
+
+
+@feed_app.command("poll")
+def feed_poll(
+    days: int = 1,
+    every: Annotated[int, typer.Option(help="초 단위 반복 간격. 0 이면 한 번만")] = 0,
+    all_companies: bool = False,
+):
+    """최근 공시를 받아 분류·저장하고 관심 종목 알림 보내기."""
+    import time
+    from datetime import date, timedelta
+
+    from dartrag.pipeline.feed import poll, send_alerts
+
+    logging.basicConfig(level=logging.INFO)
+    logging.getLogger("httpx").setLevel(logging.WARNING)
+    settings = get_settings()
+    repo = Repository.connect(settings.database_url)
+    repo.migrate()
+    notifier = _notifier(settings)
+    with OpenDartClient(settings.dart_api_key, min_interval=settings.dart_min_interval) as client:
+        while True:
+            today = date.today()
+            try:
+                s = poll(
+                    client,
+                    repo,
+                    today - timedelta(days=max(days - 1, 0)),
+                    today,
+                    listed_only=not all_companies,
+                )
+                sent, errors = send_alerts(repo, notifier)
+                typer.echo(f"공시 {s.fetched}건 확인, 새 공시 {s.new}건, 알림 {sent}건")
+                for e in errors:
+                    typer.echo(f"알림 오류: {e}", err=True)
+            except DartApiError as e:
+                typer.echo(f"OpenDART 오류: {e}", err=True)
+                if not every:
+                    raise typer.Exit(1) from None
+            if not every:
+                break
+            time.sleep(every)
+
+
+@feed_app.command("show")
+def feed_show(
+    days: int = 7,
+    min_importance: Annotated[int, typer.Option(min=1, max=3)] = 2,
+    stocks: Annotated[list[str] | None, typer.Option("--stock", "-s", help="종목코드")] = None,
+):
+    """저장된 주요 공시 보기 (중요도 3 🔴, 2 🟠, 1 ⚪)."""
+    from datetime import date, timedelta
+
+    from dartrag.feed.notify import IMPORTANCE_MARK
+
+    repo = Repository.connect(get_settings().database_url)
+    corp_codes = repo.corp_codes_for_stocks(stocks) if stocks else None
+    rows = repo.recent_disclosures(date.today() - timedelta(days=days), min_importance, corp_codes)
+    if not rows:
+        typer.echo("해당 기간에 공시가 없습니다. dartrag feed poll 을 먼저 실행하세요.")
+    for d in rows:
+        corr = " (정정)" if d["correction"] else ""
+        typer.echo(
+            f"{d['rcept_dt']} {IMPORTANCE_MARK[d['importance']]} {d['corp_name']}"
+            f" · {d['event_label']}{corr} | {d['report_nm']}"
+        )
+
+
+@watch_app.command("add")
+def watch_add(
+    stocks: list[str],
+    min_importance: Annotated[int, typer.Option(min=1, max=3)] = 2,
+):
+    """관심 종목 추가 (기본: 중요도 2 이상 공시만 알림)."""
+    repo = Repository.connect(get_settings().database_url)
+    repo.migrate()
+    for stock in stocks:
+        codes = repo.corp_codes_for_stocks([stock])
+        if not codes:
+            typer.echo(f"{stock}: DB에 없는 종목입니다. collect 를 먼저 실행하세요.", err=True)
+            continue
+        repo.set_watch(codes[0], min_importance)
+        typer.echo(f"{stock} 추가 (중요도 {min_importance} 이상 알림)")
+
+
+@watch_app.command("remove")
+def watch_remove(stocks: list[str]):
+    """관심 종목 삭제."""
+    repo = Repository.connect(get_settings().database_url)
+    for stock in stocks:
+        codes = repo.corp_codes_for_stocks([stock])
+        removed = bool(codes) and repo.remove_watch(codes[0])
+        typer.echo(f"{stock} {'삭제' if removed else '목록에 없음'}")
+
+
+@watch_app.command("list")
+def watch_list():
+    """관심 종목 목록."""
+    rows = Repository.connect(get_settings().database_url).watchlist()
+    if not rows:
+        typer.echo("관심 종목이 없습니다. dartrag watch add 005930 처럼 추가하세요.")
+    for _code, name, stock, imp in rows:
+        typer.echo(f"{stock or '-'} {name} (중요도 {imp} 이상)")
+
+
 eval_app = typer.Typer(help="답변 품질 평가")
 app.add_typer(eval_app, name="eval")
 

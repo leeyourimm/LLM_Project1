@@ -102,3 +102,19 @@ def test_server_error_is_retried(client):
 def test_requires_key():
     with pytest.raises(ValueError):
         OpenDartClient("")
+
+
+@respx.mock
+def test_iter_filings_all_companies(client):
+    route = respx.get(f"{BASE_URL}/list.json").respond(
+        json={"status": "000", "total_page": 1, "list": [_filing(1)]}
+    )
+    got = list(
+        client.iter_filings(
+            None, date(2025, 3, 1), date(2025, 3, 2), pblntf_ty="B", final_only=False
+        )
+    )
+    assert len(got) == 1
+    params = route.calls[0].request.url.params
+    assert "corp_code" not in params
+    assert params["pblntf_ty"] == "B" and params["last_reprt_at"] == "N"
