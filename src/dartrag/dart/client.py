@@ -108,27 +108,29 @@ class OpenDartClient:
 
     def iter_filings(
         self,
-        corp_code: str,
+        corp_code: str | None,
         start: date,
         end: date,
         *,
         pblntf_ty: str | None = "A",
         final_only: bool = True,
     ) -> Iterator[Filing]:
-        """공시 목록. pblntf_ty A=정기공시, B=주요사항보고, D=지분공시.
+        """공시 목록. pblntf_ty A=정기공시, B=주요사항보고, D=지분공시, I=거래소공시.
 
         final_only=True 이면 정정 전 원본을 빼고 최종 보고서만 받는다.
+        corp_code 가 None 이면 전체 회사 (OpenDART 제한으로 조회 기간 3개월 이내).
         """
         page = 1
         while True:
             params = {
-                "corp_code": corp_code,
                 "bgn_de": start.strftime("%Y%m%d"),
                 "end_de": end.strftime("%Y%m%d"),
                 "last_reprt_at": "Y" if final_only else "N",
                 "page_no": page,
                 "page_count": 100,
             }
+            if corp_code:
+                params["corp_code"] = corp_code
             if pblntf_ty:
                 params["pblntf_ty"] = pblntf_ty
             data = self._get_json("/list.json", params)

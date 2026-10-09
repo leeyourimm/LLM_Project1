@@ -24,6 +24,9 @@ class Settings(BaseSettings):
     ollama_url: str = "http://localhost:11434"
     llm_model: str = "qwen3:8b"
 
+    # 공시 알림 웹훅 (Slack·Discord). 비워 두면 터미널에만 출력
+    alert_webhook_url: str = ""
+
 
 @lru_cache
 def get_settings() -> Settings:
