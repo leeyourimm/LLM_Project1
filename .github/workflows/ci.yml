@@ -17,7 +17,7 @@ jobs:
           POSTGRES_DB: dartrag_test
         ports: ["5432:5432"]
         options: >-
-          --health-cmd "pg_isready -U dartrag"
+          --health-cmd "pg_isready -U dartrag -d dartrag_test"
           --health-interval 5s
           --health-retries 10
     env:
