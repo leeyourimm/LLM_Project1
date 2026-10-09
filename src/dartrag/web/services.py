@@ -30,6 +30,8 @@ class Services:
     secret_key: str = ""
     telegram_bot_username: str = ""
     telegram_webhook_secret: str = ""
+    # 화면을 다른 주소에서 띄울 때(예: Next 개발 서버 http://localhost:3000) 그 주소
+    allowed_origins: tuple[str, ...] = ()
 
 
 def default_services(settings: Settings) -> Services:
@@ -65,6 +67,9 @@ def default_services(settings: Settings) -> Services:
         senders=cache(lambda: build_senders(settings)),
         llm=cache(lambda: build_llm(settings)),
         public_url=settings.public_url,
+        allowed_origins=tuple(
+            o.strip().rstrip("/") for o in settings.allowed_origins.split(",") if o.strip()
+        ),
         secret_key=settings.secret_key,
         telegram_bot_username=settings.telegram_bot_username,
         telegram_webhook_secret=settings.telegram_webhook_secret,
