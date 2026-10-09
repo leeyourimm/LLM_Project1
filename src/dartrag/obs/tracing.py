@@ -104,6 +104,12 @@ class LangfuseTrace(Trace):
         self.attrs = attrs
 
     def _child(self, name, start, end, attrs: dict, error: bool = False) -> None:
+        # 환경·버전은 관측 단위로 저장되므로 하위 항목에도 붙인다
+        attrs = {
+            **attrs,
+            "langfuse.environment": self.tracer.environment,
+            "langfuse.release": self.tracer.release,
+        }
         self.tracer.emit(
             {
                 "traceId": self.id,
