@@ -18,13 +18,23 @@
 | 7. 공개 | 보안 점검, 법적 고지, 베타 공개 | ⬜ |
 
 ## 빠른 시작
+명령어는 한 줄씩 실행하세요. (macOS 기본 셸 zsh는 줄 끝 `#` 주석을 인식하지 않습니다.)
+
+1. `.env` 파일을 만들고 `DART_API_KEY=` 뒤에 인증키를 넣습니다 ([OpenDART](https://opendart.fss.or.kr)에서 발급).
 ```bash
-cp .env.example .env          # DART_API_KEY 입력 (https://opendart.fss.or.kr)
-make install                  # pip install -e ".[dev]"
-make up                       # Postgres, Qdrant, OpenSearch(nori), MinIO, Redis
-make migrate                  # 스키마 적용 (Postgres 첫 기동 시 자동 적용도 됨)
-dartrag collect               # 기본 15개사, 2022~2024 정기공시 + 재무제표
-dartrag collect -s 005930 -s 000660 --start-year 2023 --end-year 2024
+cp .env.example .env
+```
+2. 설치하고 인프라를 띄웁니다 (Docker Desktop 실행 필요). Postgres 스키마는 첫 기동 때 자동 적용되고, 다시 적용하려면 `make migrate`를 실행합니다.
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
+make install
+make up
+```
+3. 수집합니다. 옵션 없이 실행하면 기본 15개사, 2022~2024년입니다.
+```bash
+dartrag collect -s 005930 --start-year 2024 --end-year 2024
+dartrag collect
 ```
 
 ## 0단계에서 한 것
