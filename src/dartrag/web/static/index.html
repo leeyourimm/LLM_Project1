@@ -16,9 +16,30 @@
       <button role="tab" data-tab="watch">관심 종목</button>
       <button role="tab" data-tab="diff">변경점</button>
     </nav>
+    <div id="account" class="account" hidden>
+      <span id="account-email" class="muted"></span>
+      <button id="logout" type="button">로그아웃</button>
+    </div>
   </header>
 
   <main>
+    <section id="auth-view" class="auth" hidden>
+      <form id="auth-form" class="card">
+        <h2 id="auth-title">로그인</h2>
+        <label for="auth-email">이메일</label>
+        <input id="auth-email" type="email" autocomplete="username" required maxlength="254">
+        <label for="auth-password">비밀번호</label>
+        <input id="auth-password" type="password" autocomplete="current-password" required minlength="10" maxlength="128">
+        <p id="auth-hint" class="hint" hidden>비밀번호는 10자 이상으로 정해주세요.</p>
+        <div id="auth-error" role="alert"></div>
+        <button type="submit" class="primary" id="auth-submit">로그인</button>
+        <p class="muted" id="auth-switch-line">
+          <span id="auth-switch-text">계정이 없으신가요?</span>
+          <button type="button" id="auth-switch" class="link">가입하기</button>
+        </p>
+      </form>
+    </section>
+
     <section id="tab-ask" class="panel">
       <form id="ask-form" class="card">
         <label for="ask-q">무엇이 궁금하세요?</label>

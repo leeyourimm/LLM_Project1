@@ -18,8 +18,8 @@ pytestmark = pytest.mark.skipif(not URL, reason="TEST_DATABASE_URL 없음")
 def repo():
     conn = psycopg.connect(URL)
     conn.execute(
-        "DROP TABLE IF EXISTS notifications, watchlist, disclosures, chunks, financial_items, "
-        "filings, companies CASCADE"
+        "DROP TABLE IF EXISTS sessions, user_watchlist, users, notifications, watchlist, "
+        "disclosures, chunks, financial_items, filings, companies CASCADE"
     )
     conn.commit()
     r = Repository(conn)
@@ -276,3 +276,35 @@ def test_disclosures_watchlist_and_alerts(repo):
     rows = repo.recent_disclosures(date(2025, 3, 1), 2, ["00126380"])
     assert [r["rcept_no"] for r in rows] == ["20250311000002", "20250311000001"]
     assert repo.remove_watch("00126380") and not repo.remove_watch("00126380")
+
+
+def test_users_sessions_and_user_watchlist(repo):
+    from datetime import UTC, datetime, timedelta
+
+    repo.upsert_companies([Corp(corp_code="00126380", corp_name="삼성전자", stock_code="005930")])
+    uid = repo.create_user("a@b.co", "scrypt$hash")
+    assert uid and repo.create_user("a@b.co", "other") is None
+    assert repo.user_by_email("a@b.co") == (uid, "a@b.co", "scrypt$hash")
+
+    soon = datetime.now(UTC) + timedelta(days=1)
+    repo.create_session("a" * 64, uid, soon)
+    repo.create_session("b" * 64, uid, datetime.now(UTC) - timedelta(seconds=1))
+    assert repo.session_user("a" * 64) == (uid, "a@b.co")
+    assert repo.session_user("b" * 64) is None  # 만료
+    assert repo.users()[0][3] is not None  # 마지막 로그인 시각
+
+    repo.set_watch("00126380", 3, uid)
+    assert repo.watchlist(uid) == [("00126380", "삼성전자", "005930", 3)]
+    assert repo.watchlist() == []  # 운영자 목록과 분리
+    assert repo.pending_alerts("webhook") == []
+    assert repo.remove_watch("00126380", uid) and not repo.remove_watch("00126380", uid)
+
+    repo.set_password(uid, "scrypt$new")
+    assert repo.session_user("a" * 64) is None  # 비밀번호를 바꾸면 세션이 모두 끊김
+    repo.create_session("c" * 64, uid, soon)
+    repo.delete_session("c" * 64)
+    assert repo.session_user("c" * 64) is None
+    repo.create_session("d" * 64, uid, soon)
+    repo.set_watch("00126380", 2, uid)
+    assert repo.remove_user("a@b.co") and repo.users() == []
+    assert repo.session_user("d" * 64) is None

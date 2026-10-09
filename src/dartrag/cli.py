@@ -371,6 +371,12 @@ def serve(host: str = "127.0.0.1", port: int = 8000):
     repo = Repository.connect(settings.database_url)
     repo.migrate()
     repo.conn.close()
+    if host not in ("127.0.0.1", "localhost", "::1") and not settings.auth_required:
+        typer.echo(
+            "주의: 다른 컴퓨터에서 접속할 수 있게 열었는데 로그인이 꺼져 있습니다. "
+            "공개하려면 .env 에 AUTH_REQUIRED=true 를 넣으세요.",
+            err=True,
+        )
     typer.echo(f"http://{host}:{port} 에서 열립니다")
     uvicorn.run(create_app(default_services(settings)), host=host, port=port)
 
@@ -506,6 +512,73 @@ def run_all(
         typer.echo("일부 단계에 오류가 있습니다. 위 로그의 '오류:' 줄을 확인하세요.", err=True)
     typer.echo("웹 화면은 dartrag serve 로 열 수 있습니다.")
     raise typer.Exit(1 if failed else 0)
+
+
+user_app = typer.Typer(help="로그인 계정 관리 (AUTH_REQUIRED=true 일 때 사용)")
+app.add_typer(user_app, name="user")
+
+
+def _ask_password() -> str:
+    from dartrag.web.auth import AuthError, check_password_policy
+
+    password = typer.prompt("비밀번호", hide_input=True, confirmation_prompt="비밀번호 확인")
+    try:
+        check_password_policy(password)
+    except AuthError as e:
+        typer.echo(str(e), err=True)
+        raise typer.Exit(1) from None
+    return password
+
+
+@user_app.command("add")
+def user_add(email: str):
+    """계정 만들기. 비밀번호는 화면에 보이지 않게 입력받습니다."""
+    from dartrag.web.auth import AuthError, hash_password, normalize_email
+
+    try:
+        email = normalize_email(email)
+    except AuthError as e:
+        typer.echo(str(e), err=True)
+        raise typer.Exit(1) from None
+    password = _ask_password()
+    repo = Repository.connect(get_settings().database_url)
+    repo.migrate()
+    if repo.create_user(email, hash_password(password)) is None:
+        typer.echo(f"{email} 은 이미 있는 계정입니다.", err=True)
+        raise typer.Exit(1)
+    typer.echo(f"{email} 계정을 만들었습니다.")
+
+
+@user_app.command("password")
+def user_password(email: str):
+    """비밀번호 바꾸기 (그 계정의 모든 로그인이 끊깁니다)."""
+    repo = Repository.connect(get_settings().database_url)
+    row = repo.user_by_email(email.strip().lower())
+    if row is None:
+        typer.echo("없는 계정입니다.", err=True)
+        raise typer.Exit(1)
+    from dartrag.web.auth import hash_password
+
+    repo.set_password(row[0], hash_password(_ask_password()))
+    typer.echo("비밀번호를 바꿨습니다.")
+
+
+@user_app.command("list")
+def user_list():
+    """계정 목록."""
+    rows = Repository.connect(get_settings().database_url).users()
+    if not rows:
+        typer.echo("계정이 없습니다. dartrag user add 이메일 로 만드세요.")
+    for _id, email, created, last in rows:
+        last_s = last.strftime("%Y-%m-%d %H:%M") if last else "-"
+        typer.echo(f"{email}  가입 {created:%Y-%m-%d}  마지막 로그인 {last_s}")
+
+
+@user_app.command("remove")
+def user_remove(email: str):
+    """계정 삭제 (관심 종목, 로그인 기록도 함께 삭제)."""
+    removed = Repository.connect(get_settings().database_url).remove_user(email.strip().lower())
+    typer.echo(f"{email} {'삭제' if removed else '없는 계정'}")
 
 
 if __name__ == "__main__":

@@ -364,26 +364,106 @@ class Repository:
         cols = [c.name for c in cur.description]
         return [dict(zip(cols, r, strict=True)) for r in cur.fetchall()]
 
-    def set_watch(self, corp_code: str, min_importance: int) -> None:
-        self.conn.execute(
-            """INSERT INTO watchlist (corp_code, min_importance) VALUES (%s, %s)
-               ON CONFLICT (corp_code) DO UPDATE SET min_importance = EXCLUDED.min_importance""",
-            (corp_code, min_importance),
-        )
+    # 관심 종목: user_id 가 없으면 운영자 목록(watchlist), 있으면 그 사용자 목록(user_watchlist)
+
+    def set_watch(self, corp_code: str, min_importance: int, user_id: int | None = None) -> None:
+        if user_id is None:
+            self.conn.execute(
+                """INSERT INTO watchlist (corp_code, min_importance) VALUES (%s, %s)
+                   ON CONFLICT (corp_code)
+                   DO UPDATE SET min_importance = EXCLUDED.min_importance""",
+                (corp_code, min_importance),
+            )
+        else:
+            self.conn.execute(
+                """INSERT INTO user_watchlist (user_id, corp_code, min_importance)
+                   VALUES (%s, %s, %s)
+                   ON CONFLICT (user_id, corp_code)
+                   DO UPDATE SET min_importance = EXCLUDED.min_importance""",
+                (user_id, corp_code, min_importance),
+            )
         self.conn.commit()
 
-    def remove_watch(self, corp_code: str) -> bool:
-        cur = self.conn.execute("DELETE FROM watchlist WHERE corp_code = %s", (corp_code,))
+    def remove_watch(self, corp_code: str, user_id: int | None = None) -> bool:
+        if user_id is None:
+            cur = self.conn.execute("DELETE FROM watchlist WHERE corp_code = %s", (corp_code,))
+        else:
+            cur = self.conn.execute(
+                "DELETE FROM user_watchlist WHERE user_id = %s AND corp_code = %s",
+                (user_id, corp_code),
+            )
         self.conn.commit()
         return cur.rowcount > 0
 
-    def watchlist(self) -> list[tuple[str, str, str | None, int]]:
+    def watchlist(self, user_id: int | None = None) -> list[tuple[str, str, str | None, int]]:
+        if user_id is None:
+            source, params = "watchlist w", ()
+        else:
+            source, params = "user_watchlist w", (user_id,)
+        where = "" if user_id is None else "WHERE w.user_id = %s"
         return self.conn.execute(
-            """SELECT w.corp_code, COALESCE(c.corp_name, w.corp_code), c.stock_code,
-                      w.min_importance
-               FROM watchlist w LEFT JOIN companies c USING (corp_code)
-               ORDER BY c.corp_name"""
+            f"""SELECT w.corp_code, COALESCE(c.corp_name, w.corp_code), c.stock_code,
+                       w.min_importance
+                FROM {source} LEFT JOIN companies c USING (corp_code)
+                {where}
+                ORDER BY c.corp_name""",
+            params,
         ).fetchall()
+
+    # --- 로그인 ---------------------------------------------------------
+
+    def create_user(self, email: str, password_hash: str) -> int | None:
+        """새 사용자 id. 이미 있는 이메일이면 None."""
+        row = self.conn.execute(
+            """INSERT INTO users (email, password_hash) VALUES (%s, %s)
+               ON CONFLICT (email) DO NOTHING RETURNING id""",
+            (email, password_hash),
+        ).fetchone()
+        self.conn.commit()
+        return row[0] if row else None
+
+    def user_by_email(self, email: str) -> tuple[int, str, str] | None:
+        return self.conn.execute(
+            "SELECT id, email, password_hash FROM users WHERE email = %s", (email,)
+        ).fetchone()
+
+    def set_password(self, user_id: int, password_hash: str) -> None:
+        self.conn.execute(
+            "UPDATE users SET password_hash = %s WHERE id = %s", (password_hash, user_id)
+        )
+        # 비밀번호를 바꾸면 다른 기기의 로그인도 모두 끊는다
+        self.conn.execute("DELETE FROM sessions WHERE user_id = %s", (user_id,))
+        self.conn.commit()
+
+    def users(self) -> list[tuple[int, str, object, object]]:
+        return self.conn.execute(
+            "SELECT id, email, created_at, last_login_at FROM users ORDER BY id"
+        ).fetchall()
+
+    def remove_user(self, email: str) -> bool:
+        cur = self.conn.execute("DELETE FROM users WHERE email = %s", (email,))
+        self.conn.commit()
+        return cur.rowcount > 0
+
+    def create_session(self, token_hash: str, user_id: int, expires_at) -> None:
+        self.conn.execute(
+            "INSERT INTO sessions (token_hash, user_id, expires_at) VALUES (%s, %s, %s)",
+            (token_hash, user_id, expires_at),
+        )
+        self.conn.execute("UPDATE users SET last_login_at = now() WHERE id = %s", (user_id,))
+        self.conn.execute("DELETE FROM sessions WHERE expires_at < now()")
+        self.conn.commit()
+
+    def session_user(self, token_hash: str) -> tuple[int, str] | None:
+        return self.conn.execute(
+            """SELECT u.id, u.email FROM sessions s JOIN users u ON u.id = s.user_id
+               WHERE s.token_hash = %s AND s.expires_at > now()""",
+            (token_hash,),
+        ).fetchone()
+
+    def delete_session(self, token_hash: str) -> None:
+        self.conn.execute("DELETE FROM sessions WHERE token_hash = %s", (token_hash,))
+        self.conn.commit()
 
     def pending_alerts(self, channel: str) -> list[dict]:
         """관심 종목의 기준 이상 공시 중 이 채널로 아직 안 보낸 것."""

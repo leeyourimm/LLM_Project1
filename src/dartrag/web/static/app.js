@@ -24,6 +24,7 @@ async function api(path, options = {}) {
     ...options,
   });
   const body = res.status === 204 ? null : await res.json().catch(() => null);
+  if (res.status === 401 && !path.startsWith("/api/auth/")) showLogin();
   if (!res.ok) {
     const detail = body && body.detail;
     const msg = typeof detail === "string" ? detail : "요청을 처리하지 못했습니다";
@@ -485,11 +486,83 @@ $("#company-form").addEventListener("submit", (e) => {
   loadCompany(stock);
 });
 
-// ---- 시작 ----
-loadCompanies();
-const [initial, initialStock] = location.hash.slice(1).split("/");
-showTab(["ask", "company", "feed", "watch", "diff"].includes(initial) ? initial : "ask");
-if (initial === "company" && /^\d{6}$/.test(initialStock || "")) {
-  $("#company-stock").value = initialStock;
-  loadCompany(initialStock);
+// ---- 로그인 ----
+let authInfo = { auth_required: false, allow_signup: false, user: null };
+let signupMode = false;
+
+function setAuthMode(signup) {
+  signupMode = signup && authInfo.allow_signup;
+  $("#auth-title").textContent = signupMode ? "가입하기" : "로그인";
+  $("#auth-submit").textContent = signupMode ? "가입하고 시작하기" : "로그인";
+  $("#auth-password").setAttribute("autocomplete", signupMode ? "new-password" : "current-password");
+  $("#auth-hint").hidden = !signupMode;
+  $("#auth-switch-text").textContent = signupMode ? "이미 계정이 있으신가요?" : "계정이 없으신가요?";
+  $("#auth-switch").textContent = signupMode ? "로그인" : "가입하기";
+  $("#auth-switch-line").hidden = !authInfo.allow_signup;
+  $("#auth-error").replaceChildren();
 }
+
+function showLogin() {
+  document.querySelectorAll(".panel").forEach((p) => { p.hidden = true; });
+  $(".tabs").hidden = true;
+  $("#account").hidden = true;
+  $("#auth-view").hidden = false;
+  setAuthMode(signupMode);
+  $("#auth-email").focus();
+}
+
+$("#auth-switch").addEventListener("click", () => setAuthMode(!signupMode));
+
+$("#auth-form").addEventListener("submit", async (e) => {
+  e.preventDefault();
+  const button = $("#auth-submit");
+  button.disabled = true;
+  try {
+    const r = await api(signupMode ? "/api/auth/signup" : "/api/auth/login", {
+      method: "POST",
+      body: JSON.stringify({ email: $("#auth-email").value, password: $("#auth-password").value }),
+    });
+    $("#auth-password").value = "";
+    authInfo.user = r.user;
+    startApp();
+  } catch (err) {
+    $("#auth-error").replaceChildren(errorBox(err));
+  } finally {
+    button.disabled = false;
+  }
+});
+
+$("#logout").addEventListener("click", async () => {
+  try {
+    await api("/api/auth/logout", { method: "POST" });
+  } finally {
+    authInfo.user = null;
+    signupMode = false;
+    showLogin();
+  }
+});
+
+function startApp() {
+  $("#auth-view").hidden = true;
+  $(".tabs").hidden = false;
+  $("#account").hidden = !authInfo.user;
+  $("#account-email").textContent = authInfo.user ? authInfo.user.email : "";
+  loadCompanies();
+  const [initial, initialStock] = location.hash.slice(1).split("/");
+  showTab(["ask", "company", "feed", "watch", "diff"].includes(initial) ? initial : "ask");
+  if (initial === "company" && /^\d{6}$/.test(initialStock || "")) {
+    $("#company-stock").value = initialStock;
+    loadCompany(initialStock);
+  }
+}
+
+// ---- 시작 ----
+(async () => {
+  try {
+    authInfo = await api("/api/auth/me");
+  } catch {
+    // 서버가 옛 버전이거나 잠시 안 될 때는 로그인 없이 시작
+  }
+  if (authInfo.auth_required && !authInfo.user) showLogin();
+  else startApp();
+})();

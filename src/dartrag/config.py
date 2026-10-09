@@ -27,6 +27,12 @@ class Settings(BaseSettings):
     # 공시 알림 웹훅 (Slack·Discord). 비워 두면 터미널에만 출력
     alert_webhook_url: str = ""
 
+    # 로그인. 인터넷에 공개할 때만 AUTH_REQUIRED=true 로 켠다
+    auth_required: bool = False
+    allow_signup: bool = True
+    cookie_secure: bool = False  # https 로 서비스할 때 true
+    session_days: int = 30
+
 
 @lru_cache
 def get_settings() -> Settings:

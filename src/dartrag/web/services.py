@@ -18,6 +18,11 @@ class Services:
     repo: Callable[[], "contextmanager[Repository]"]
     answerer: Callable[[Repository], object]  # Answerer
     retriever: Callable[[Repository], object]  # HybridRetriever
+    # 로그인: 내 컴퓨터에서만 쓸 때는 끄고(기본), 인터넷에 공개할 때 켠다
+    auth_required: bool = False
+    allow_signup: bool = True
+    cookie_secure: bool = False
+    session_days: int = 30
 
 
 def default_services(settings: Settings) -> Services:
@@ -56,4 +61,12 @@ def default_services(settings: Settings) -> Services:
         llm = OllamaLLM(settings.llm_model, settings.ollama_url)
         return Answerer(retriever(r), llm, finance=FinanceTool(r))
 
-    return Services(repo, answerer, retriever)
+    return Services(
+        repo,
+        answerer,
+        retriever,
+        auth_required=settings.auth_required,
+        allow_signup=settings.allow_signup,
+        cookie_secure=settings.cookie_secure,
+        session_days=settings.session_days,
+    )
