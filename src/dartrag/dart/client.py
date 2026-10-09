@@ -28,6 +28,15 @@ class DartApiError(RuntimeError):
         self.status = status
 
 
+class DartHttpError(RuntimeError):
+    """재시도해도 안 된 HTTP·연결 오류. httpx 오류 메시지에는 인증키가 든 주소가 찍혀서
+    (작업 기록, 로그, 오류 수집으로 퍼진다) 경로와 상태 코드만 남긴다."""
+
+    def __init__(self, path: str, detail: str):
+        super().__init__(f"OpenDART {path} 요청 실패: {detail}")
+        self.path = path
+
+
 class QuotaExceeded(DartApiError):
     """오늘 쓰기로 정한 호출 수를 다 썼다 (OpenDART 하루 한도는 키당 20,000회)."""
 
@@ -88,9 +97,14 @@ class OpenDartClient:
             try:
                 resp = self._http.get(path, params=params)
                 resp.raise_for_status()
-            except (httpx.TransportError, httpx.HTTPStatusError):
+            except (httpx.TransportError, httpx.HTTPStatusError) as e:
                 if attempt == self._max_retries:
-                    raise
+                    detail = (
+                        f"HTTP {e.response.status_code}"
+                        if isinstance(e, httpx.HTTPStatusError)
+                        else type(e).__name__
+                    )
+                    raise DartHttpError(path, detail) from None
                 self._sleep(2**attempt)
                 continue
             status = _error_status(resp)

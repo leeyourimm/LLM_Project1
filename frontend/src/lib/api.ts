@@ -46,7 +46,31 @@ export const post = <T>(path: string, data?: unknown) =>
 export const patch = <T>(path: string, data: unknown) =>
   api<T>(path, { method: "PATCH", body: JSON.stringify(data) });
 
-export const del = <T>(path: string) => api<T>(path, { method: "DELETE" });
+export const del = <T>(path: string, data?: unknown) =>
+  api<T>(path, { method: "DELETE", body: data === undefined ? undefined : JSON.stringify(data) });
+
+/** 파일 내려받기. 오류(한도 초과 등)는 파일 대신 ApiError 로 알린다. */
+export async function download(path: string, fallbackName: string): Promise<void> {
+  const res = await fetch(path, { credentials: "same-origin" });
+  if (!res.ok) {
+    let body: unknown = null;
+    try {
+      body = await res.json();
+    } catch {
+      body = null;
+    }
+    throw new ApiError(res.status, detailOf(body, res.status));
+  }
+  const name = /filename="([^"]+)"/.exec(res.headers.get("content-disposition") ?? "")?.[1] ?? fallbackName;
+  const url = URL.createObjectURL(await res.blob());
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = name;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+}
 
 export function qs(params: Record<string, string | number | boolean | string[] | undefined | null>) {
   const p = new URLSearchParams();

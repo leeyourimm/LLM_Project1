@@ -92,6 +92,37 @@ class FakeRepo:
     def delete_session(self, token_hash):
         self.sessions.pop(token_hash, None)
 
+    def delete_user(self, uid):
+        if self.users.pop(uid, None) is None:
+            return False
+        self.sessions = {t: u for t, u in self.sessions.items() if u != uid}
+        self.watch = {k: v for k, v in self.watch.items() if k[0] != uid}
+        self.channels = {k: v for k, v in self.channels.items() if k[0] != uid}
+        self.convs = {i: c for i, c in self.convs.items() if c["user_id"] != uid}
+        return True
+
+    def export_user(self, uid):
+        if uid not in self.users:
+            return None
+        return {
+            "account": {
+                "email": self.users[uid][0],
+                "created_at": datetime(2026, 1, 1, tzinfo=UTC),
+            },
+            "watchlist": [
+                {"corp_code": c, "min_importance": m} for c, *_, m in self.watchlist(uid)
+            ],
+            "alert_channels": [
+                {k: v for k, v in ch.items() if k != "pending"} for ch in self.alert_channels(uid)
+            ],
+            "notifications": [],
+            "conversations": [
+                {"id": i, "title": c["title"], "messages": c["messages"]}
+                for i, c in self.convs.items()
+                if c["user_id"] == uid
+            ],
+        }
+
     def filing_info(self, rcept_no):
         return {
             "rcept_no": rcept_no,
@@ -788,8 +819,15 @@ def test_unsubscribe_link(alerting):
     anon = TestClient(client.app)
     t = unsubscribe_token("s3cret", 1, "email")
     assert "잘못된" in anon.get(f"/api/alerts/unsubscribe?u=1&k=email&t={'0' * 64}").text
-    assert "껐습니다" in anon.get(f"/api/alerts/unsubscribe?u=1&k=email&t={t}").text
-    assert repo.channels[(1, "email")]["enabled"] is False
+    assert "잘못된" in anon.post(f"/api/alerts/unsubscribe?u=2&k=email&t={t}").text
+    # 링크를 열기만 해서는(메일 보안 검사기의 미리 열기) 꺼지지 않고 확인 버튼을 보여 준다
+    page = anon.get(f"/api/alerts/unsubscribe?u=1&k=email&t={t}")
+    assert "알림 끄기" in page.text and f"t={t}" in page.text and "method='post'" in page.text
+    assert repo.channels[(1, "email")]["enabled"] is True
+    # 확인 버튼(같은 사이트 폼)과 메일 앱의 원클릭 구독 취소(Origin 없음)
+    same = {"Origin": "http://testserver"}
+    r = anon.post(f"/api/alerts/unsubscribe?u=1&k=email&t={t}", headers=same)
+    assert "껐습니다" in r.text and repo.channels[(1, "email")]["enabled"] is False
     repo.channels[(1, "email")]["enabled"] = True
     assert anon.post(f"/api/alerts/unsubscribe?u=1&k=email&t={t}").status_code == 200
     assert repo.channels[(1, "email")]["enabled"] is False
@@ -811,3 +849,125 @@ def test_diff_summary_endpoint(ctx):
     assert repo.saved_summary[:2] == ("old", "new")
     bad = client.get("/api/diff/summary", params={"stock": "005930", "kind": "x"})
     assert bad.status_code == 422
+
+
+def test_account_delete(secure):
+    client, repo, services = secure
+    client.post("/api/auth/signup", json={"email": "a@b.co", "password": PW})
+    client.post("/api/watchlist", json={"stock": "005930"})
+    client.post("/api/ask", json={"question": "삼성전자 매출은?"})
+    phone = TestClient(client.app)  # 같은 계정의 다른 기기
+    phone.post("/api/auth/login", json={"email": "a@b.co", "password": PW})
+    other = TestClient(client.app)
+    other.post("/api/auth/signup", json={"email": "c@d.co", "password": PW})
+    other.post("/api/watchlist", json={"stock": "005930"})
+
+    assert (
+        TestClient(client.app).request("DELETE", "/api/account", json={"password": PW}).status_code
+        == 401
+    )
+    wrong = client.request("DELETE", "/api/account", json={"password": "wrong password"})
+    assert wrong.status_code == 401 and 1 in repo.users
+    cross = client.request(
+        "DELETE",
+        "/api/account",
+        json={"password": PW},
+        headers={"Origin": "https://evil.example"},
+    )
+    assert cross.status_code == 403 and 1 in repo.users
+
+    r = client.request("DELETE", "/api/account", json={"password": PW})
+    assert r.status_code == 200
+    cookie = r.headers["set-cookie"]
+    assert "dartrag_session=" in cookie and "Max-Age=0" in cookie and "HttpOnly" in cookie
+    assert 1 not in repo.users and all(u != 1 for u in repo.sessions.values())
+    assert all(k[0] != 1 for k in repo.watch) and all(
+        c["user_id"] != 1 for c in repo.convs.values()
+    )
+    assert client.get("/api/companies").status_code == 401
+    assert phone.get("/api/companies").status_code == 401  # 다른 기기도 끊김
+    gone = client.post("/api/auth/login", json={"email": "a@b.co", "password": PW})
+    assert gone.status_code == 401
+    # 다른 사용자의 기록은 그대로
+    assert other.get("/api/watchlist").json()[0]["stock_code"] == "005930"
+
+
+def test_account_delete_rate_limit_and_local_mode(ctx):
+    from dartrag.web.ratelimit import Rule
+
+    client, *_ = ctx
+    body = {"password": PW}
+    assert client.request("DELETE", "/api/account", json=body).status_code == 400
+    assert client.get("/api/account/export").status_code == 400
+
+    repo = FakeRepo()
+
+    @contextmanager
+    def repo_cm():
+        yield repo
+
+    services = Services(
+        repo_cm,
+        lambda r: FakeAnswerer(),
+        lambda r: FakeRetriever(),
+        auth_required=True,
+        limits={"auth": [Rule(2, 3600, "1시간에 2번")]},
+    )
+    client = TestClient(create_app(services))
+    client.post("/api/auth/signup", json={"email": "a@b.co", "password": PW})
+    codes = [
+        client.request("DELETE", "/api/account", json={"password": "guess-" + str(i) * 6})
+        for i in range(3)
+    ]
+    assert [c.status_code for c in codes] == [401, 401, 429]
+    assert 1 in repo.users
+
+
+def test_account_export(secure):
+    client, repo, _ = secure
+    client.post("/api/auth/signup", json={"email": "a@b.co", "password": PW})
+    client.post("/api/watchlist", json={"stock": "005930"})
+    client.post("/api/ask", json={"question": "삼성전자 매출은?"})
+    repo.start_alert_channel(1, "email", "a@b.co", "pending-hash-value", None)
+    other = TestClient(client.app)
+    other.post("/api/auth/signup", json={"email": "c@d.co", "password": PW})
+    other.post("/api/ask", json={"question": "남의 질문"})
+
+    r = client.get("/api/account/export")
+    assert r.status_code == 200
+    assert r.headers["content-disposition"].startswith('attachment; filename="dartrag-export-')
+    assert r.headers["cache-control"] == "no-store"
+    data = r.json()
+    assert data["account"]["email"] == "a@b.co" and "exported_at" in data
+    assert data["watchlist"][0]["corp_code"] == "00126380"
+    assert data["alert_channels"][0]["kind"] == "email"
+    [conv] = data["conversations"]
+    assert [m["role"] for m in conv["messages"]] == ["user", "assistant"]
+    text = r.text
+    assert "scrypt" not in text and "pending-hash-value" not in text and "남의 질문" not in text
+    assert TestClient(client.app).get("/api/account/export").status_code == 401
+
+
+def test_more_security_headers_and_fetch_metadata():
+    repo = FakeRepo()
+
+    @contextmanager
+    def repo_cm():
+        yield repo
+
+    services = Services(
+        repo_cm, lambda r: FakeAnswerer(), lambda r: FakeRetriever(), cookie_secure=True
+    )
+    client = TestClient(create_app(services))
+    r = client.get("/api/watchlist")
+    assert r.headers["cache-control"] == "no-store"
+    assert r.headers["strict-transport-security"].startswith("max-age=")
+    assert "camera=()" in r.headers["permissions-policy"]
+    # Origin 을 빼도 브라우저가 다른 사이트라고 알려 주면 막는다
+    body = {"stock": "005930"}
+    cross = client.post("/api/watchlist", json=body, headers={"Sec-Fetch-Site": "cross-site"})
+    assert cross.status_code == 403
+    ok = client.post("/api/watchlist", json=body, headers={"Sec-Fetch-Site": "same-origin"})
+    assert ok.status_code == 201
+    insecure = TestClient(create_app(Services(repo_cm, lambda r: None, lambda r: None)))
+    assert "strict-transport-security" not in insecure.get("/api/health").headers

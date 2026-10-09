@@ -10,6 +10,7 @@ import time
 from datetime import UTC, datetime, timedelta
 from html import escape
 from typing import Annotated, Literal
+from urllib.parse import urlencode
 
 from fastapi import APIRouter, BackgroundTasks, Body, Header, HTTPException, Path, Query
 from fastapi.responses import HTMLResponse, RedirectResponse
@@ -30,14 +31,15 @@ class EnabledRequest(BaseModel):
     enabled: bool
 
 
-def _page(title: str, message: str) -> HTMLResponse:
+def _page(title: str, message: str, form: str = "") -> HTMLResponse:
+    """form: 이미 이스케이프한 HTML 조각 (버튼 하나짜리 폼)."""
     return HTMLResponse(
         "<!doctype html><meta charset='utf-8'>"
         "<meta name='viewport' content='width=device-width,initial-scale=1'>"
         f"<title>{escape(title)}</title>"
         "<body style='font-family:system-ui,sans-serif;max-width:480px;margin:15vh auto;"
         "padding:0 16px;line-height:1.6'>"
-        f"<h1 style='font-size:1.3rem'>{escape(title)}</h1><p>{escape(message)}</p>"
+        f"<h1 style='font-size:1.3rem'>{escape(title)}</h1><p>{escape(message)}</p>{form}"
         "<p><a href='/'>서비스로 돌아가기</a></p></body>"
     )
 
@@ -142,16 +144,29 @@ def build_routers(services, CurrentUser) -> tuple[APIRouter, APIRouter]:  # noqa
             return _page("링크가 만료됐습니다", "알림 설정에서 인증 메일을 다시 받아 주세요.")
         return RedirectResponse("/#alerts", status_code=303)
 
+    def _valid(u: int, k: str, t: str) -> bool:
+        return k in ("email", "telegram") and check_unsubscribe(services.secret_key, u, k, t)
+
+    def _invalid() -> HTMLResponse:
+        return _page("잘못된 링크입니다", "알림 설정 화면에서 직접 끌 수 있습니다.")
+
     def _unsubscribe(u: int, k: str, t: str) -> HTMLResponse:
-        if k not in ("email", "telegram") or not check_unsubscribe(services.secret_key, u, k, t):
-            return _page("잘못된 링크입니다", "알림 설정 화면에서 직접 끌 수 있습니다.")
+        if not _valid(u, k, t):
+            return _invalid()
         with services.repo() as repo:
             repo.set_alert_enabled(u, k, False)
         return _page("알림을 껐습니다", "다시 받으려면 알림 설정에서 켜 주세요.")
 
+    # 메일 보안 검사기가 링크를 미리 열어도 꺼지지 않게, 링크를 열면 확인 버튼만 보여 준다
     @public.get("/api/alerts/unsubscribe", include_in_schema=False)
     def unsubscribe_page(u: int, k: str, t: Annotated[str, Query(max_length=128)]):
-        return _unsubscribe(u, k, t)
+        if not _valid(u, k, t):
+            return _invalid()
+        action = escape(f"/api/alerts/unsubscribe?{urlencode({'u': u, 'k': k, 't': t})}")
+        form = f"<form method='post' action='{action}'><button>알림 끄기</button></form>"
+        return _page(
+            "알림을 끌까요?", "아래 버튼을 누르면 이 채널로 오는 공시 알림이 멈춥니다.", form
+        )
 
     # 메일 앱의 원클릭 구독 취소(RFC 8058)는 같은 주소로 POST 를 보낸다
     @public.post("/api/alerts/unsubscribe", include_in_schema=False)

@@ -6,13 +6,14 @@ import { useState } from "react";
 import { useApp } from "@/components/providers";
 import { ErrorBox } from "@/components/ui";
 import { post } from "@/lib/api";
+import { safeNext } from "@/lib/redirect";
 
 export function AuthForm({ mode }: { mode: "login" | "signup" }) {
   const { auth, refreshAuth } = useApp();
   const router = useRouter();
   const params = useSearchParams();
   const next = params.get("next");
-  const target = next && next.startsWith("/") && !next.startsWith("//") ? next : "/";
+  const target = safeNext(next);
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [agree, setAgree] = useState(false);
