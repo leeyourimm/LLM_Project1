@@ -23,6 +23,10 @@ from dartrag.obs.errors import init_sentry
 from dartrag.worker import jobs
 
 log = logging.getLogger(__name__)
+# httpx 는 INFO 로 요청 주소를 남기는데, 거기에 OpenDART 인증키(crtfc_key)와 텔레그램 봇 토큰이
+# 들어 있다. 작업자를 -l info 로 띄워도 찍히지 않게 끈다
+for _name in ("httpx", "httpcore"):
+    logging.getLogger(_name).setLevel(logging.WARNING)
 
 settings = get_settings()
 init_sentry(settings, "worker")

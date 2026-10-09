@@ -516,9 +516,89 @@ class Repository:
         ).fetchall()
 
     def remove_user(self, email: str) -> bool:
-        cur = self.conn.execute("DELETE FROM users WHERE email = %s", (email,))
-        self.conn.commit()
+        """이메일로 계정 삭제 (CLI). 화면의 탈퇴와 같은 delete_user 를 쓴다."""
+        row = self.conn.execute("SELECT id FROM users WHERE email = %s", (email,)).fetchone()
+        return self.delete_user(row[0]) if row else False
+
+    # 사용자 기록이 든 표. 순서대로 지운다 (평가 → 메시지 → 대화 → … → 계정)
+    _USER_DELETES = (
+        """DELETE FROM feedback WHERE message_id IN (
+               SELECT m.id FROM messages m JOIN conversations c ON c.id = m.conversation_id
+               WHERE c.user_id = %s)""",
+        """DELETE FROM messages WHERE conversation_id IN (
+               SELECT id FROM conversations WHERE user_id = %s)""",
+        "DELETE FROM conversations WHERE user_id = %s",
+        "DELETE FROM user_notifications WHERE user_id = %s",
+        "DELETE FROM user_alert_channels WHERE user_id = %s",
+        "DELETE FROM user_watchlist WHERE user_id = %s",
+        "DELETE FROM sessions WHERE user_id = %s",
+    )
+
+    def delete_user(self, user_id: int) -> bool:
+        """계정과 그 사용자의 기록을 한 트랜잭션에서 모두 지운다.
+
+        외래 키의 ON DELETE CASCADE 로도 지워지지만, 나중에 표를 더하다 빠뜨려도
+        기록이 남지 않게 직접 지운다. 하나라도 실패하면 아무것도 지우지 않는다."""
+        try:
+            for sql in self._USER_DELETES:
+                self.conn.execute(sql, (user_id,))
+            cur = self.conn.execute("DELETE FROM users WHERE id = %s", (user_id,))
+            self.conn.commit()
+        except Exception:
+            self.conn.rollback()
+            raise
         return cur.rowcount > 0
+
+    def export_user(self, user_id: int) -> dict | None:
+        """내 데이터 내려받기용. 비밀번호 해시, 세션, 인증 코드 해시는 넣지 않는다."""
+
+        def rows(sql: str, params: tuple) -> list[dict]:
+            cur = self.conn.execute(sql, params)
+            cols = [c.name for c in cur.description]
+            return [dict(zip(cols, r, strict=True)) for r in cur.fetchall()]
+
+        found = rows("SELECT email, created_at, last_login_at FROM users WHERE id = %s", (user_id,))
+        if not found:
+            return None
+        conversations = rows(
+            """SELECT id, title, created_at, updated_at FROM conversations
+               WHERE user_id = %s ORDER BY created_at, id""",
+            (user_id,),
+        )
+        messages = rows(
+            """SELECT m.conversation_id, m.id, m.role, m.content, m.payload, m.created_at,
+                      f.rating AS feedback_rating, f.reason AS feedback_reason,
+                      f.comment AS feedback_comment, f.created_at AS feedback_at
+               FROM messages m JOIN conversations c ON c.id = m.conversation_id
+               LEFT JOIN feedback f ON f.message_id = m.id
+               WHERE c.user_id = %s ORDER BY m.id""",
+            (user_id,),
+        )
+        by_conv: dict[int, list[dict]] = {}
+        for m in messages:
+            fb = {k: m.pop(f"feedback_{k}") for k in ("rating", "reason", "comment", "at")}
+            m["feedback"] = fb if fb["rating"] is not None else None
+            by_conv.setdefault(m.pop("conversation_id"), []).append(m)
+        return {
+            "account": found[0],
+            "watchlist": rows(
+                """SELECT w.corp_code, c.corp_name, c.stock_code, w.min_importance, w.added_at
+                   FROM user_watchlist w LEFT JOIN companies c USING (corp_code)
+                   WHERE w.user_id = %s ORDER BY w.added_at, w.corp_code""",
+                (user_id,),
+            ),
+            "alert_channels": rows(
+                """SELECT kind, target, verified_at, enabled, created_at
+                   FROM user_alert_channels WHERE user_id = %s ORDER BY kind""",
+                (user_id,),
+            ),
+            "notifications": rows(
+                """SELECT rcept_no, channel, sent_at FROM user_notifications
+                   WHERE user_id = %s ORDER BY sent_at, rcept_no""",
+                (user_id,),
+            ),
+            "conversations": [c | {"messages": by_conv.get(c["id"], [])} for c in conversations],
+        }
 
     def create_session(self, token_hash: str, user_id: int, expires_at) -> None:
         self.conn.execute(
