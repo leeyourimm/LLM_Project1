@@ -69,7 +69,10 @@ function showTab(name) {
     p.hidden = p.id !== `tab-${name}`;
   });
   if (name === "feed") loadFeed();
-  if (name === "watch") loadWatch();
+  if (name === "watch") {
+    loadWatch();
+    loadAlerts();
+  }
   history.replaceState(null, "", `#${name}`);
 }
 document.querySelectorAll(".tabs button").forEach((b) =>
@@ -258,8 +261,10 @@ $("#diff-form").addEventListener("submit", async (e) => {
     const real = r.sections.filter((s) => s.status !== "changed" || s.added.length || s.removed.length || s.modified.length);
     const minor = r.sections.filter((s) => !real.includes(s));
     const link = (f) => el("a", { href: `https://dart.fss.or.kr/dsaf001/main.do?rcpNo=${f.rcept_no}`, target: "_blank", rel: "noopener" }, f.report_nm);
+    const summary = el("div", { class: "card diff-summary" });
     out.replaceChildren(
       el("div", { class: "card" }, el("h2", {}, r.title), el("div", { class: "muted" }, link(r.old), " → ", link(r.new))),
+      summary,
       ...real.map((s) =>
         el(
           "div",
@@ -282,10 +287,122 @@ $("#diff-form").addEventListener("submit", async (e) => {
         ? el("div", { class: "card muted" }, "숫자만 갱신된 섹션: ", minor.map((s) => `${s.key} (${s.numbers_only})`).join(", "))
         : ""
     );
+    loadDiffSummary(stock, summary);
   } catch (err) {
     out.replaceChildren(errorBox(err));
   }
 });
+
+
+// ---- 알림 채널 (로그인을 켠 경우) ----
+const CHANNEL = { email: "이메일", telegram: "텔레그램" };
+
+async function loadAlerts() {
+  const box = $("#alert-settings");
+  try {
+    const r = await api("/api/alerts");
+    if (!r.per_user) {
+      box.replaceChildren(
+        el("div", { class: "card muted" },
+          "알림은 .env 의 ALERT_WEBHOOK_URL, ALERT_TELEGRAM_CHAT_ID, ALERT_EMAIL_TO 로 받습니다. ",
+          el("code", {}, "dartrag alert test"), " 로 시험해 보세요.")
+      );
+      return;
+    }
+    const byKind = Object.fromEntries(r.channels.map((c) => [c.kind, c]));
+    const rows = ["email", "telegram"].map((kind) => {
+      const ch = byKind[kind];
+      const state = !r.available[kind]
+        ? "서버에 설정되지 않음"
+        : !ch
+          ? "연결 안 됨"
+          : !ch.verified
+            ? ch.pending ? "인증 대기 중" : "인증 만료"
+            : ch.enabled ? "켜짐" : "꺼짐";
+      const actions = [];
+      if (r.available[kind] && (!ch || !ch.verified)) {
+        actions.push(el("button", { type: "button", onclick: () => connect(kind) }, kind === "email" ? "인증 메일 받기" : "텔레그램 연결"));
+      }
+      if (ch && ch.verified) {
+        actions.push(el("button", { type: "button", onclick: () => toggle(kind, !ch.enabled) }, ch.enabled ? "끄기" : "켜기"));
+        actions.push(el("button", { type: "button", onclick: () => remove(kind) }, "삭제"));
+      }
+      return el("li", {}, el("div", { class: "grow" }, el("strong", {}, CHANNEL[kind]), el("span", { class: "muted" }, ` · ${state}`)), ...actions);
+    });
+    const note = el("div", { id: "alert-note", role: "status" });
+    box.replaceChildren(el("div", { class: "card" }, el("h3", {}, "알림 받을 곳"), el("ul", { class: "list" }, rows), note));
+  } catch (err) {
+    box.replaceChildren(errorBox(err));
+  }
+
+  async function connect(kind) {
+    try {
+      if (kind === "email") {
+        const r = await api("/api/alerts/email", { method: "POST" });
+        await loadAlerts();
+        $("#alert-note").textContent = `${r.sent_to} 로 인증 메일을 보냈습니다. 메일의 링크를 열면 알림이 시작됩니다.`;
+      } else {
+        const r = await api("/api/alerts/telegram", { method: "POST" });
+        await loadAlerts();
+        $("#alert-note").replaceChildren(
+          "아래 링크를 열고 텔레그램에서 '시작'을 누르세요 (30분 안에): ",
+          el("a", { href: r.link, target: "_blank", rel: "noopener" }, "봇 열기")
+        );
+      }
+    } catch (err) {
+      box.prepend(errorBox(err));
+    }
+  }
+  async function toggle(kind, enabled) {
+    try {
+      await api(`/api/alerts/${kind}`, { method: "PATCH", body: JSON.stringify({ enabled }) });
+      loadAlerts();
+    } catch (err) {
+      box.prepend(errorBox(err));
+    }
+  }
+  async function remove(kind) {
+    try {
+      await api(`/api/alerts/${kind}`, { method: "DELETE" });
+      loadAlerts();
+    } catch (err) {
+      box.prepend(errorBox(err));
+    }
+  }
+}
+
+// ---- 변경점 요약 ----
+async function loadDiffSummary(stock, box) {
+  box.replaceChildren(el("div", { class: "muted spinner" }, "요약을 만드는 중… 처음에는 1~2분 걸릴 수 있습니다."));
+  try {
+    const r = await api(`/api/diff/summary?stock=${stock}`);
+    const parts = [el("h3", {}, "한눈에 보기")];
+    for (const [key, points] of Object.entries(r.points)) {
+      parts.push(el("h4", {}, r.titles[key]));
+      parts.push(el("ul", {}, points.map((p) => el("li", {}, p.text,
+        p.unverified.length ? el("span", { class: "flag" }, " (숫자 확인 필요)") : "",
+        el("span", { class: "muted" }, ` ${p.refs.map((n) => `[${n}]`).join("")}`)))));
+    }
+    const won = (v) => (v === null ? "-" : `${(v / 1e8).toLocaleString("ko-KR", { maximumFractionDigits: 0 })}억원`);
+    const metrics = r.metrics.filter((m) => m.before !== null && m.after !== null);
+    if (metrics.length) {
+      parts.push(el("h4", {}, "숫자 변화 (재무 데이터로 계산)"));
+      parts.push(el("ul", {}, metrics.map((m) => el("li", {}, `${m.label}: ${won(m.before)} → ${won(m.after)}`,
+        m.growth !== null ? ` (${m.growth > 0 ? "+" : ""}${m.growth}%)` : ""))));
+    }
+    if (!Object.keys(r.points).length && !metrics.length) {
+      parts.push(el("p", { class: "muted" }, r.model ? "요약할 만한 변경을 찾지 못했습니다." : "답변 모델이 꺼져 있어 요약을 만들지 않았습니다."));
+    }
+    if (r.evidence.length) {
+      parts.push(el("details", {}, el("summary", {}, `근거 항목 ${r.evidence.length}개`),
+        el("ol", {}, r.evidence.map((e) => el("li", {}, el("span", { class: "muted" }, `${e.section} · ${e.kind} `), e.text)))));
+    }
+    parts.push(el("p", { class: "muted" }, r.model ? `요약 모델 ${r.model} · ` : "", r.disclaimer));
+    box.replaceChildren(...parts);
+  } catch (err) {
+    box.replaceChildren(errorBox(err));
+  }
+}
 
 // ---- 회사 대시보드 ----
 const KPI = [
@@ -551,7 +668,8 @@ function startApp() {
   $("#account-email").textContent = authInfo.user ? authInfo.user.email : "";
   loadCompanies();
   const [initial, initialStock] = location.hash.slice(1).split("/");
-  showTab(["ask", "company", "feed", "watch", "diff"].includes(initial) ? initial : "ask");
+  const tab = initial === "alerts" ? "watch" : initial;
+  showTab(["ask", "company", "feed", "watch", "diff"].includes(tab) ? tab : "ask");
   if (initial === "company" && /^\d{6}$/.test(initialStock || "")) {
     $("#company-stock").value = initialStock;
     loadCompany(initialStock);

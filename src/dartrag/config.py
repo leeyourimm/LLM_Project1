@@ -36,6 +36,26 @@ class Settings(BaseSettings):
 
     # 공시 알림 웹훅 (Slack·Discord). 비워 두면 터미널에만 출력
     alert_webhook_url: str = ""
+    # 운영자 본인에게 보내는 텔레그램·이메일 알림 (비우면 쓰지 않음)
+    alert_telegram_chat_id: str = ""
+    alert_email_to: str = ""
+
+    # 텔레그램 봇 (BotFather 에서 받은 토큰). 사용자별 알림에도 쓴다
+    telegram_bot_token: str = ""
+    telegram_bot_username: str = ""
+    telegram_webhook_secret: str = ""  # 공개 서버에서 웹훅을 쓸 때만
+
+    # 메일 발송 (SMTP). 사용자별 이메일 알림과 인증 메일에 쓴다
+    smtp_host: str = ""
+    smtp_port: int = 587
+    smtp_username: str = ""
+    smtp_password: str = ""
+    smtp_from: str = ""
+    smtp_starttls: bool = True
+
+    # 메일 속 링크(인증, 구독 취소)에 쓰는 서비스 주소와 서명용 비밀값
+    public_url: str = "http://127.0.0.1:8000"
+    secret_key: str = ""
 
     # 로그인. 인터넷에 공개할 때만 AUTH_REQUIRED=true 로 켠다
     auth_required: bool = False

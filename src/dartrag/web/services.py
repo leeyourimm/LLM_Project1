@@ -23,10 +23,25 @@ class Services:
     cookie_secure: bool = False
     session_days: int = 30
     report_font: str | None = None  # PDF 리포트용 한글 TTF 경로 (없으면 자동 탐색)
+    # 알림: 발송 수단({"email": …, "telegram": …}), 변경점 요약용 LLM
+    senders: Callable[[], dict] = dict
+    llm: Callable[[], object] | None = None
+    public_url: str = "http://127.0.0.1:8000"
+    secret_key: str = ""
+    telegram_bot_username: str = ""
+    telegram_webhook_secret: str = ""
 
 
 def default_services(settings: Settings) -> Services:
-    from dartrag.factory import Backends, build_answerer, build_retriever
+    from functools import cache
+
+    from dartrag.factory import (
+        Backends,
+        build_answerer,
+        build_llm,
+        build_retriever,
+        build_senders,
+    )
 
     backends = Backends(settings)
 
@@ -47,4 +62,10 @@ def default_services(settings: Settings) -> Services:
         cookie_secure=settings.cookie_secure,
         session_days=settings.session_days,
         report_font=settings.report_font,
+        senders=cache(lambda: build_senders(settings)),
+        llm=cache(lambda: build_llm(settings)),
+        public_url=settings.public_url,
+        secret_key=settings.secret_key,
+        telegram_bot_username=settings.telegram_bot_username,
+        telegram_webhook_secret=settings.telegram_webhook_secret,
     )

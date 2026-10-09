@@ -206,11 +206,19 @@ def diff(
     new: Annotated[str | None, typer.Option(help="이후 공시 접수번호")] = None,
     kind: str = "사업보고서",
     out: Path | None = None,
+    summary: Annotated[
+        bool, typer.Option(help="LLM 으로 새 위험·빠진 내용·주요 변경을 요약 (Ollama 필요)")
+    ] = False,
+    refresh: Annotated[bool, typer.Option(help="저장된 요약을 버리고 다시 만들기")] = False,
 ):
     """두 보고서를 섹션별로 비교해 바뀐 내용 보기 (기본: 최근 두 사업보고서)."""
     from dartrag.changes.compare import compare_filings, latest_pair
 
-    repo = Repository.connect(get_settings().database_url)
+    settings = get_settings()
+    repo = Repository.connect(settings.database_url)
+    if summary:
+        _diff_summary(repo, settings, stock, kind, refresh)
+        return
     if not (old and new):
         if not stock:
             typer.echo("--stock 또는 --old/--new 를 지정하세요.", err=True)
@@ -234,6 +242,28 @@ def diff(
         typer.echo(f"→ {out}")
     else:
         typer.echo(text)
+
+
+def _diff_summary(repo, settings, stock, kind, refresh):
+    from dartrag.answer import LLMError
+    from dartrag.changes.summary import latest_digest, render_text
+    from dartrag.factory import build_llm
+
+    corp_codes = repo.corp_codes_for_stocks([stock]) if stock else []
+    if not corp_codes:
+        typer.echo("--stock 으로 DB 에 있는 종목코드를 지정하세요.", err=True)
+        raise typer.Exit(1)
+    try:
+        digest = latest_digest(repo, corp_codes[0], build_llm(settings), kind, refresh=refresh)
+    except (LLMError, ValueError) as e:
+        typer.echo(str(e), err=True)
+        raise typer.Exit(1) from None
+    if digest is None:
+        typer.echo(f"비교할 {kind}가 두 건 이상 없습니다.", err=True)
+        raise typer.Exit(1)
+    typer.echo(render_text(digest))
+    if digest.dropped:
+        typer.echo(f"참고: 근거 번호가 틀린 요약 문장 {digest.dropped}개를 뺐습니다.", err=True)
 
 
 @app.command()
@@ -267,12 +297,22 @@ watch_app = typer.Typer(help="알림 받을 관심 종목")
 app.add_typer(watch_app, name="watch")
 
 
-def _notifier(settings):
-    from dartrag.feed.notify import ConsoleNotifier, WebhookNotifier
+def _send_all_alerts(repo, settings) -> tuple[int, list[str]]:
+    """운영자 채널(.env)과 사용자별 채널(웹에서 등록)로 알림을 보낸다."""
+    from dartrag.factory import build_notifiers, build_senders
+    from dartrag.feed.alerts import send_user_alerts, unsubscribe_link
+    from dartrag.pipeline.feed import send_alerts
 
-    if settings.alert_webhook_url:
-        return WebhookNotifier(settings.alert_webhook_url)
-    return ConsoleNotifier(typer.echo)
+    sent, errors = 0, []
+    for notifier in build_notifiers(settings, typer.echo):
+        n, errs = send_alerts(repo, notifier)
+        sent, errors = sent + n, errors + errs
+    run = send_user_alerts(
+        repo,
+        build_senders(settings),
+        unsubscribe_url=unsubscribe_link(settings.public_url, settings.secret_key),
+    )
+    return sent + run.sent, errors + run.errors
 
 
 @feed_app.command("poll")
@@ -285,14 +325,13 @@ def feed_poll(
     import time
     from datetime import date, timedelta
 
-    from dartrag.pipeline.feed import poll, send_alerts
+    from dartrag.pipeline.feed import poll
 
     logging.basicConfig(level=logging.INFO)
     logging.getLogger("httpx").setLevel(logging.WARNING)
     settings = get_settings()
     repo = Repository.connect(settings.database_url)
     repo.migrate()
-    notifier = _notifier(settings)
     with OpenDartClient(settings.dart_api_key, min_interval=settings.dart_min_interval) as client:
         while True:
             today = date.today()
@@ -304,7 +343,7 @@ def feed_poll(
                     today,
                     listed_only=not all_companies,
                 )
-                sent, errors = send_alerts(repo, notifier)
+                sent, errors = _send_all_alerts(repo, settings)
                 typer.echo(f"공시 {s.fetched}건 확인, 새 공시 {s.new}건, 알림 {sent}건")
                 for e in errors:
                     typer.echo(f"알림 오류: {e}", err=True)
@@ -315,6 +354,87 @@ def feed_poll(
             if not every:
                 break
             time.sleep(every)
+
+
+telegram_app = typer.Typer(help="텔레그램 알림 봇")
+app.add_typer(telegram_app, name="telegram")
+
+
+def _telegram(settings):
+    from dartrag.feed.channels import TelegramSender
+
+    if not settings.telegram_bot_token:
+        typer.echo(".env 에 TELEGRAM_BOT_TOKEN 을 넣으세요 (@BotFather 에서 발급).", err=True)
+        raise typer.Exit(1)
+    return TelegramSender(settings.telegram_bot_token)
+
+
+@telegram_app.command("poll")
+def telegram_poll():
+    """봇에 온 메시지를 받아 사용자 연결을 처리 (내 컴퓨터에서 웹훅 없이 쓸 때). Ctrl+C 로 종료."""
+    from dartrag.feed.channels import SendError
+    from dartrag.feed.telegram_bot import handle_update
+
+    settings = get_settings()
+    sender = _telegram(settings)
+    repo = Repository.connect(settings.database_url)
+    offset = None
+    typer.echo("텔레그램 메시지를 기다립니다...")
+    while True:
+        try:
+            updates = sender.get_updates(offset)
+        except SendError as e:
+            typer.echo(str(e), err=True)
+            import time
+
+            time.sleep(5)
+            continue
+        for u in updates:
+            offset = u["update_id"] + 1
+            reply = handle_update(repo, u, sender)
+            if reply:
+                typer.echo(f"처리: {reply.splitlines()[0]}")
+
+
+@telegram_app.command("webhook")
+def telegram_webhook():
+    """공개 서버에서 텔레그램이 PUBLIC_URL/api/telegram/webhook 으로 메시지를 보내게 등록."""
+    from dartrag.feed.channels import SendError
+
+    settings = get_settings()
+    if not settings.telegram_webhook_secret or not settings.public_url.startswith("https://"):
+        typer.echo("TELEGRAM_WEBHOOK_SECRET 과 https 주소의 PUBLIC_URL 이 필요합니다.", err=True)
+        raise typer.Exit(1)
+    try:
+        _telegram(settings).set_webhook(
+            f"{settings.public_url.rstrip('/')}/api/telegram/webhook",
+            settings.telegram_webhook_secret,
+        )
+    except SendError as e:
+        typer.echo(str(e), err=True)
+        raise typer.Exit(1) from None
+    typer.echo("웹훅을 등록했습니다.")
+
+
+alert_app = typer.Typer(help="알림 채널 점검")
+app.add_typer(alert_app, name="alert")
+
+
+@alert_app.command("test")
+def alert_test():
+    """.env 에 설정한 내 알림 채널(웹훅·텔레그램·이메일)로 시험 메시지 보내기."""
+    from dartrag.factory import build_notifiers
+
+    failed = False
+    for n in build_notifiers(get_settings(), typer.echo):
+        try:
+            n.send("DART 공시 알림 시험 메시지입니다.")
+            typer.echo(f"✓ {n.channel}")
+        except Exception as e:  # noqa: BLE001
+            failed = True
+            typer.echo(f"✗ {n.channel}: {e}", err=True)
+    if failed:
+        raise typer.Exit(1)
 
 
 @feed_app.command("show")

@@ -16,6 +16,7 @@ from pydantic import BaseModel, Field
 
 from dartrag.search import SearchFilter
 from dartrag.web import auth
+from dartrag.web.alerts import build_routers as build_alert_routers
 from dartrag.web.chat import DISCLAIMER, build_router
 from dartrag.web.chat import source_dict as _source
 from dartrag.web.insights import build_router as build_insights_router
@@ -328,6 +329,9 @@ def create_app(services: Services, limiter: auth.LoginLimiter | None = None) -> 
 
     api.include_router(build_router(services, CurrentUser, corp_codes))
     api.include_router(build_insights_router(services))
+    alerts_api, alerts_public = build_alert_routers(services, CurrentUser)
+    api.include_router(alerts_api)
+    app.include_router(alerts_public)
     app.include_router(api)
     app.mount("/static", StaticFiles(directory=STATIC), name="static")
 

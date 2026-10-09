@@ -8,6 +8,7 @@ from fastapi import APIRouter, HTTPException, Path, Query
 from fastapi.responses import Response
 from pydantic import BaseModel, Field
 
+from dartrag.changes.summary import DART_URL
 from dartrag.search import SearchFilter
 from dartrag.web.chat import DISCLAIMER, source_dict
 
@@ -109,6 +110,37 @@ def build_router(services) -> APIRouter:
                 for i, h in enumerate(result.hits, start=1)
             ],
             "model": answerer.llm.name,
+            "disclaimer": DISCLAIMER,
+        }
+
+    @router.get("/api/diff/summary")
+    def diff_summary(
+        stock: Annotated[str, Query(pattern=STOCK)],
+        kind: Annotated[str, Query(pattern="^(사업보고서|반기보고서|분기보고서)$")] = "사업보고서",
+        refresh: bool = False,
+    ):
+        """최근 두 보고서의 변경점 요약 (새 위험, 빠진 내용, 주요 변경, 숫자 변화).
+
+        처음 요청할 때 답변 모델로 만들고 저장해 두었다가 다시 쓴다."""
+        from dartrag.answer import LLMError
+        from dartrag.changes.summary import CATEGORIES, latest_digest
+
+        with services.repo() as repo:
+            code, *_ = company_or_404(repo, stock)
+            llm = services.llm() if services.llm else None
+            try:
+                digest = latest_digest(repo, code, llm, kind, refresh=refresh)
+            except LLMError as e:
+                raise HTTPException(503, str(e)) from None
+            except ValueError as e:
+                raise HTTPException(404, str(e)) from None
+        if digest is None:
+            raise HTTPException(404, f"비교할 {kind}가 두 건 이상 없습니다")
+        titles = {v: k for k, v in CATEGORIES.items()}
+        return digest.to_dict() | {
+            "titles": titles,
+            "old_url": DART_URL.format(digest.old["rcept_no"]),
+            "new_url": DART_URL.format(digest.new["rcept_no"]),
             "disclaimer": DISCLAIMER,
         }
 

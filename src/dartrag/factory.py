@@ -98,3 +98,48 @@ def build_answerer(backends: Backends, repo: Repository, *, use_cache: bool = Tr
             embed=backends.embedder.embed_query if s.semantic_cache else None,
         )
     return Answerer(build_retriever(backends, repo), llm, finance=FinanceTool(repo), cache=cache)
+
+
+def build_llm(settings: Settings):
+    from dartrag.answer import OllamaLLM
+
+    return OllamaLLM(settings.llm_model, settings.ollama_url)
+
+
+def build_senders(settings: Settings) -> dict:
+    """설정된 발송 수단만: {"email": EmailSender, "telegram": TelegramSender}."""
+    from dartrag.feed.channels import EmailSender, TelegramSender
+
+    senders: dict = {}
+    if settings.smtp_host and settings.smtp_from:
+        senders["email"] = EmailSender(
+            settings.smtp_host,
+            settings.smtp_port,
+            username=settings.smtp_username,
+            password=settings.smtp_password,
+            sender=settings.smtp_from,
+            starttls=settings.smtp_starttls,
+        )
+    if settings.telegram_bot_token:
+        senders["telegram"] = TelegramSender(settings.telegram_bot_token)
+    return senders
+
+
+def build_notifiers(settings: Settings, echo=print) -> list:
+    """운영자 본인용 알림 채널. 아무것도 설정하지 않으면 터미널 출력."""
+    from dartrag.feed.notify import (
+        ConsoleNotifier,
+        EmailNotifier,
+        TelegramNotifier,
+        WebhookNotifier,
+    )
+
+    senders = build_senders(settings)
+    out: list = []
+    if settings.alert_webhook_url:
+        out.append(WebhookNotifier(settings.alert_webhook_url))
+    if settings.alert_telegram_chat_id and "telegram" in senders:
+        out.append(TelegramNotifier(senders["telegram"], settings.alert_telegram_chat_id))
+    if settings.alert_email_to and "email" in senders:
+        out.append(EmailNotifier(senders["email"], settings.alert_email_to))
+    return out or [ConsoleNotifier(echo)]

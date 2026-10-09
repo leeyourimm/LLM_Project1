@@ -18,7 +18,8 @@ pytestmark = pytest.mark.skipif(not URL, reason="TEST_DATABASE_URL 없음")
 def repo():
     conn = psycopg.connect(URL)
     conn.execute(
-        "DROP TABLE IF EXISTS feedback, messages, conversations, sessions, user_watchlist, "
+        "DROP TABLE IF EXISTS diff_summaries, user_notifications, user_alert_channels, "
+        "feedback, messages, conversations, sessions, user_watchlist, "
         "users, notifications, watchlist, disclosures, chunks, financial_items, filings, "
         "companies, app_state CASCADE"
     )
@@ -392,3 +393,69 @@ def test_quarter_rows_include_report_code_and_cumulative(repo):
     )
     got = sorted((r.reprt_code, r.amount, r.add_amount) for r in rows)
     assert got == [("11011", 400, None), ("11014", 90, 300)]
+
+
+def test_user_alert_channels_and_pending(repo):
+    from datetime import UTC, datetime, timedelta
+
+    repo.upsert_companies([Corp(corp_code="00126380", corp_name="삼성전자", stock_code="005930")])
+    uid = repo.create_user("a@b.co", "h")
+    other = repo.create_user("c@d.co", "h")
+    repo.set_watch("00126380", 2, uid)
+    repo.set_watch("00126380", 3, other)
+    later = datetime.now(UTC) + timedelta(hours=1)
+
+    repo.start_alert_channel(uid, "email", "a@b.co", "e" * 64, later)
+    repo.start_alert_channel(uid, "telegram", None, "t" * 64, later)
+    repo.start_alert_channel(other, "telegram", None, "x" * 64, datetime.now(UTC))  # 만료
+    assert repo.confirm_alert_channel("telegram", "x" * 64, target="9") is None
+    assert repo.confirm_alert_channel("email", "e" * 64) == uid
+    assert repo.confirm_alert_channel("email", "e" * 64) is None  # 한 번만 쓴다
+    assert repo.confirm_alert_channel("telegram", "t" * 64, target="42") == uid
+    chans = {c["kind"]: c for c in repo.alert_channels(uid)}
+    assert chans["email"]["verified"] and chans["telegram"]["target"] == "42"
+
+    base = {
+        "corp_code": "00126380",
+        "corp_name": "삼성전자",
+        "stock_code": "005930",
+        "corp_cls": "Y",
+        "report_nm": "보고서",
+        "flr_nm": None,
+        "rcept_dt": date(2025, 3, 11),
+        "rm": None,
+        "pblntf_ty": "B",
+        "event_type": "x",
+        "event_label": "라벨",
+        "correction": False,
+    }
+    repo.insert_disclosures(
+        [
+            {**base, "rcept_no": "20250311000001", "importance": 3},
+            {**base, "rcept_no": "20250311000002", "importance": 1},
+        ]
+    )
+    pending = repo.user_pending_alerts()
+    assert [(p["user_id"], p["kind"], p["rcept_no"]) for p in pending] == [
+        (uid, "email", "20250311000001"),
+        (uid, "telegram", "20250311000001"),
+    ]  # 인증 안 된 다른 사용자, 중요도 낮은 공시는 빠진다
+    repo.mark_user_notified(uid, ["20250311000001"], "email")
+    assert [p["kind"] for p in repo.user_pending_alerts()] == ["telegram"]
+    assert repo.disable_telegram_chat("42") == 1
+    assert repo.user_pending_alerts() == []
+    assert repo.set_alert_enabled(uid, "telegram", True)
+    assert repo.remove_alert_channel(uid, "telegram") and not repo.remove_alert_channel(
+        uid, "telegram"
+    )
+    assert repo.user_pending_alerts() == []
+
+
+def test_diff_summary_storage(repo):
+    assert repo.diff_summary("a" * 14, "b" * 14) is None
+    payload = {"old": {"rcept_dt": date(2024, 3, 12)}, "points": {}}
+    repo.save_diff_summary("a" * 14, "b" * 14, 1, "qwen3:8b", payload)
+    repo.save_diff_summary("a" * 14, "b" * 14, 1, None, payload)
+    saved = repo.diff_summary("a" * 14, "b" * 14)
+    assert saved["model"] is None and saved["payload"]["old"]["rcept_dt"] == "2024-03-12"
+    assert repo.latest_diff_summary_for("b" * 14) == saved["payload"]

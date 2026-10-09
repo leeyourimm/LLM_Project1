@@ -27,6 +27,8 @@ from dartrag.pipeline.feed import poll, send_alerts
         ("연결재무제표기준영업(잠정)실적(공정공시)", "preliminary_earnings", 2, False),
         ("주식등의대량보유상황보고서(일반)", "major_holding", 1, False),
         ("[첨부추가]기타경영사항(자율공시)", "other", 1, False),
+        ("사업보고서 (2024.12)", "periodic_report", 2, False),
+        ("[기재정정]반기보고서 (2025.06)", "periodic_report", 2, True),
     ],
 )
 def test_classify(name, type_, importance, correction):
@@ -100,6 +102,7 @@ class FakeRepo:
         self.inserted = []
         self.pending = list(pending)
         self.notified = []
+        self.summaries = {}
 
     def insert_disclosures(self, rows):
         self.inserted += rows
@@ -111,10 +114,13 @@ class FakeRepo:
     def mark_notified(self, rcept_no, channel):
         self.notified.append((rcept_no, channel))
 
+    def latest_diff_summary_for(self, rcept_no):
+        return self.summaries.get(rcept_no)
+
 
 def test_poll_classifies_and_filters_listed():
     client, repo = FakeClient(), FakeRepo()
-    s = poll(client, repo, date(2025, 3, 11), date(2025, 3, 11))
+    s = poll(client, repo, date(2025, 3, 11), date(2025, 3, 11), types=("B", "I"))
     assert client.calls == [(None, "B", False), (None, "I", False)]
     assert (s.fetched, s.new) == (3, 1)
     assert [r["rcept_no"] for r in repo.inserted] == ["20250311000001", "20250311000003"]
@@ -123,8 +129,19 @@ def test_poll_classifies_and_filters_listed():
     assert first["pblntf_ty"] == "B" and first["importance"] == 3
 
     repo = FakeRepo()
-    poll(FakeClient(), repo, date(2025, 3, 11), date(2025, 3, 11), listed_only=False)
+    poll(
+        FakeClient(),
+        repo,
+        date(2025, 3, 11),
+        date(2025, 3, 11),
+        types=("B", "I"),
+        listed_only=False,
+    )
     assert len(repo.inserted) == 3
+    # 기본값은 정기공시(A)도 받아 변경점 요약 알림에 쓴다
+    client = FakeClient()
+    poll(client, FakeRepo(), date(2025, 3, 11), date(2025, 3, 11))
+    assert [c[1] for c in client.calls] == ["A", "B", "I"]
 
 
 def test_send_alerts_marks_only_successful():

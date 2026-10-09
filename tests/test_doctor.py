@@ -114,3 +114,22 @@ def test_redis_check():
     assert doctor.check_redis(S, lambda url, **kw: Ok()).ok
     c = doctor.check_redis(S, down)
     assert not c.ok and not c.required and c.fix == "make up"
+
+
+def test_check_alerts():
+    from dartrag.config import Settings
+    from dartrag.doctor import check_alerts
+
+    ok = check_alerts(Settings(_env_file=None))
+    assert ok.ok and not ok.required and "터미널" in ok.detail
+    bad = check_alerts(
+        Settings(
+            _env_file=None,
+            auth_required=True,
+            telegram_bot_token="t",
+            alert_email_to="me@x.co",
+        )
+    )
+    assert not bad.ok
+    assert "SMTP_HOST" in bad.detail and "SECRET_KEY" in bad.detail
+    assert "TELEGRAM_BOT_USERNAME" in bad.detail

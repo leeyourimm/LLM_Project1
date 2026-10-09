@@ -165,6 +165,39 @@ def check_disk(path: Path = Path("."), min_free_gb: int = MIN_FREE_GB, usage=shu
     )
 
 
+def check_alerts(settings: Settings) -> Check:
+    """알림 설정 점검. 설정하지 않아도 되지만, 하다 만 설정은 알려 준다."""
+    problems = []
+    if settings.smtp_host and not settings.smtp_from:
+        problems.append("SMTP_FROM 이 비어 있습니다")
+    if settings.alert_telegram_chat_id and not settings.telegram_bot_token:
+        problems.append("ALERT_TELEGRAM_CHAT_ID 를 쓰려면 TELEGRAM_BOT_TOKEN 이 필요합니다")
+    if settings.alert_email_to and not settings.smtp_host:
+        problems.append("ALERT_EMAIL_TO 를 쓰려면 SMTP_HOST 가 필요합니다")
+    if settings.auth_required and (settings.smtp_host or settings.telegram_bot_token):
+        if len(settings.secret_key) < 32:
+            problems.append("사용자 알림 링크 서명에 SECRET_KEY(32자 이상)가 필요합니다")
+        if settings.telegram_bot_token and not settings.telegram_bot_username:
+            problems.append("텔레그램 연결 링크에 TELEGRAM_BOT_USERNAME 이 필요합니다")
+    channels = [
+        name
+        for name, on in [
+            ("웹훅", settings.alert_webhook_url),
+            ("텔레그램", settings.telegram_bot_token),
+            ("이메일", settings.smtp_host),
+        ]
+        if on
+    ]
+    detail = ", ".join(channels) if channels else "터미널 출력만 (설정된 채널 없음)"
+    return Check(
+        "알림 채널",
+        not problems,
+        detail if not problems else "; ".join(problems),
+        "" if not problems else ".env 의 알림 설정을 확인하세요",
+        required=False,
+    )
+
+
 def run_checks(settings: Settings, http: httpx.Client | None = None, *, online: bool = True):
     own = http is None
     http = http or httpx.Client()
@@ -179,6 +212,7 @@ def run_checks(settings: Settings, http: httpx.Client | None = None, *, online: 
             check_redis(settings),
             check_embedding_package(),
             check_ollama(settings, http),
+            check_alerts(settings),
             check_disk(),
         ]
     finally:

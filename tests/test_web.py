@@ -35,6 +35,7 @@ class FakeRepo:
         self.msg_seq = 0
         self.feedback = {}
         self.closed = False
+        self.channels = {}
 
     def corp_codes_for_stocks(self, stocks):
         return ["00126380"] if "005930" in stocks else []
@@ -157,6 +158,54 @@ class FakeRepo:
 
     def listed_companies(self):
         return [("00126380", "삼성전자"), ("00164779", "SK하이닉스")]
+
+    # 알림 채널
+    def start_alert_channel(self, uid, kind, target, hashed, until):
+        self.channels[(uid, kind)] = {
+            "target": target,
+            "hash": hashed,
+            "verified": False,
+            "enabled": True,
+        }
+
+    def confirm_alert_channel(self, kind, hashed, target=None):
+        for (uid, k), ch in self.channels.items():
+            if k == kind and ch["hash"] == hashed:
+                ch.update(hash=None, verified=True, target=target or ch["target"])
+                return uid
+        return None
+
+    def alert_channels(self, uid):
+        return [
+            {
+                "kind": k,
+                "target": ch["target"],
+                "verified": ch["verified"],
+                "enabled": ch["enabled"],
+                "pending": ch["hash"] is not None,
+            }
+            for (u, k), ch in self.channels.items()
+            if u == uid
+        ]
+
+    def set_alert_enabled(self, uid, kind, enabled):
+        if (uid, kind) not in self.channels:
+            return False
+        self.channels[(uid, kind)]["enabled"] = enabled
+        return True
+
+    def remove_alert_channel(self, uid, kind):
+        return self.channels.pop((uid, kind), None) is not None
+
+    def disable_telegram_chat(self, chat_id):
+        return 0
+
+    # 변경점 요약
+    def diff_summary(self, old, new):
+        return None
+
+    def save_diff_summary(self, *a):
+        self.saved_summary = a
 
     # 대화 기록
     def create_conversation(self, user_id, title):
@@ -619,3 +668,111 @@ def test_conversations_are_private(secure):
     assert other.get("/api/conversations").json() == []
     r = other.post("/api/ask", json={"question": "그럼 전년은?", "conversation_id": cid})
     assert r.status_code == 404
+
+
+class FakeSender:
+    def __init__(self):
+        self.sent = []
+
+    def send(self, *a):
+        self.sent.append(a)
+
+
+@pytest.fixture
+def alerting():
+    repo = FakeRepo()
+    senders = {"email": FakeSender(), "telegram": FakeSender()}
+
+    @contextmanager
+    def repo_cm():
+        yield repo
+
+    services = Services(
+        repo_cm,
+        lambda r: FakeAnswerer(),
+        lambda r: FakeRetriever(),
+        auth_required=True,
+        senders=lambda: senders,
+        public_url="https://dart.example",
+        secret_key="s3cret",
+        telegram_bot_username="@dart_bot",
+        telegram_webhook_secret="hook-secret",
+    )
+    client = TestClient(create_app(services))
+    client.post("/api/auth/signup", json={"email": "a@b.co", "password": PW})
+    return client, repo, senders
+
+
+def test_email_alert_verification(alerting):
+    client, repo, senders = alerting
+    r = client.get("/api/alerts").json()
+    assert r["per_user"] and r["available"] == {"email": True, "telegram": True}
+    assert client.post("/api/alerts/email").json() == {"ok": True, "sent_to": "a@b.co"}
+    assert client.post("/api/alerts/email").status_code == 429  # 연달아 보내지 않는다
+    to, subject, body = senders["email"].sent[0]
+    assert to == "a@b.co" and "인증" in subject
+    link = next(w for w in body.split() if w.startswith("https://dart.example/api/alerts/"))
+    assert client.get("/api/alerts").json()["channels"][0]["verified"] is False
+    token = link.split("token=")[1]
+    ok = client.get(f"/api/alerts/email/verify?token={token}", follow_redirects=False)
+    assert ok.status_code == 303 and ok.headers["location"] == "/#alerts"
+    assert client.get("/api/alerts").json()["channels"][0]["verified"] is True
+    again = client.get(f"/api/alerts/email/verify?token={token}")
+    assert "만료" in again.text
+
+    assert client.patch("/api/alerts/email", json={"enabled": False}).status_code == 200
+    assert client.patch("/api/alerts/telegram", json={"enabled": False}).status_code == 404
+    assert client.delete("/api/alerts/email").status_code == 200
+
+
+def test_telegram_link_and_webhook(alerting):
+    client, repo, senders = alerting
+    link = client.post("/api/alerts/telegram").json()["link"]
+    assert link.startswith("https://t.me/dart_bot?start=")
+    code = link.split("start=")[1]
+    update = {
+        "update_id": 1,
+        "message": {"text": f"/start {code}", "chat": {"id": 42, "type": "private"}},
+    }
+    hook = TestClient(client.app)  # 텔레그램 서버: 쿠키 없음
+    assert hook.post("/api/telegram/webhook", json=update).status_code == 403
+    bad = {"X-Telegram-Bot-Api-Secret-Token": "nope"}
+    assert hook.post("/api/telegram/webhook", json=update, headers=bad).status_code == 403
+    good = {"X-Telegram-Bot-Api-Secret-Token": "hook-secret"}
+    assert hook.post("/api/telegram/webhook", json=update, headers=good).status_code == 200
+    ch = client.get("/api/alerts").json()["channels"][0]
+    assert ch["kind"] == "telegram" and ch["target"] == "42" and ch["verified"]
+    assert senders["telegram"].sent[0][0] == "42"
+
+
+def test_unsubscribe_link(alerting):
+    from dartrag.feed.alerts import unsubscribe_token
+
+    client, repo, _ = alerting
+    repo.start_alert_channel(1, "email", "a@b.co", "h", None)
+    anon = TestClient(client.app)
+    t = unsubscribe_token("s3cret", 1, "email")
+    assert "잘못된" in anon.get(f"/api/alerts/unsubscribe?u=1&k=email&t={'0' * 64}").text
+    assert "껐습니다" in anon.get(f"/api/alerts/unsubscribe?u=1&k=email&t={t}").text
+    assert repo.channels[(1, "email")]["enabled"] is False
+    repo.channels[(1, "email")]["enabled"] = True
+    assert anon.post(f"/api/alerts/unsubscribe?u=1&k=email&t={t}").status_code == 200
+    assert repo.channels[(1, "email")]["enabled"] is False
+
+
+def test_alerts_need_login_mode(ctx):
+    client, *_ = ctx
+    r = client.get("/api/alerts").json()
+    assert r["per_user"] is False and r["available"] == {"email": False, "telegram": False}
+    assert client.post("/api/alerts/email").status_code == 400
+
+
+def test_diff_summary_endpoint(ctx):
+    client, repo, _ = ctx
+    r = client.get("/api/diff/summary", params={"stock": "005930"}).json()
+    # 짧은 문장("관세 위험")은 요약 근거에서 빠지지만 바뀐 섹션 수는 센다
+    assert r["model"] is None and r["sections_changed"] == 1 and r["evidence"] == []
+    assert r["titles"]["new_risks"] == "새로 생긴 위험" and r["new_url"].endswith("rcpNo=new")
+    assert repo.saved_summary[:2] == ("old", "new")
+    bad = client.get("/api/diff/summary", params={"stock": "005930", "kind": "x"})
+    assert bad.status_code == 422

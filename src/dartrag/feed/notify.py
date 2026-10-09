@@ -51,3 +51,28 @@ def format_alert(d: dict) -> str:
         f"{d['report_nm']} ({d['rcept_dt']})\n"
         f"https://dart.fss.or.kr/dsaf001/main.do?rcpNo={d['rcept_no']}"
     )
+
+
+class TelegramNotifier:
+    """운영자 한 사람에게 보내는 텔레그램 알림 (.env 의 대화방 ID)."""
+
+    channel = "telegram"
+
+    def __init__(self, sender, chat_id: str):
+        self._sender = sender
+        self._chat_id = chat_id
+
+    def send(self, text: str) -> None:
+        self._sender.send(self._chat_id, text)
+
+
+class EmailNotifier:
+    channel = "email"
+
+    def __init__(self, sender, to: str):
+        self._sender = sender
+        self._to = to
+
+    def send(self, text: str) -> None:
+        first = text.splitlines()[0] if text else "공시 알림"
+        self._sender.send(self._to, f"[DART 알림] {first.lstrip('🔴🟠⚪ ')}", text)

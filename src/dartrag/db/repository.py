@@ -690,3 +690,142 @@ class Repository:
         cur = self.conn.execute(query + " ORDER BY f.created_at", params)
         cols = [c.name for c in cur.description]
         return [dict(zip(cols, r, strict=True)) for r in cur.fetchall()]
+
+    # --- 변경점 요약 -----------------------------------------------------
+
+    def diff_summary(self, old_rcept_no: str, new_rcept_no: str) -> dict | None:
+        row = self.conn.execute(
+            """SELECT version, model, payload, created_at FROM diff_summaries
+               WHERE old_rcept_no = %s AND new_rcept_no = %s""",
+            (old_rcept_no, new_rcept_no),
+        ).fetchone()
+        if row is None:
+            return None
+        return dict(zip(("version", "model", "payload", "created_at"), row, strict=True))
+
+    def latest_diff_summary_for(self, new_rcept_no: str) -> dict | None:
+        """이 공시를 '이후' 보고서로 만든 요약 (알림에 붙인다)."""
+        row = self.conn.execute(
+            """SELECT payload FROM diff_summaries WHERE new_rcept_no = %s
+               ORDER BY created_at DESC LIMIT 1""",
+            (new_rcept_no,),
+        ).fetchone()
+        return row[0] if row else None
+
+    def save_diff_summary(
+        self, old_rcept_no: str, new_rcept_no: str, version: int, model: str | None, payload: dict
+    ) -> None:
+        import json
+
+        from psycopg.types.json import Jsonb
+
+        # 공시 정보에 날짜가 들어 있어 문자열로 바꿔 저장한다
+        data = Jsonb(json.loads(json.dumps(payload, default=str)))
+        self.conn.execute(
+            """INSERT INTO diff_summaries (old_rcept_no, new_rcept_no, version, model, payload)
+               VALUES (%s, %s, %s, %s, %s)
+               ON CONFLICT (old_rcept_no, new_rcept_no) DO UPDATE SET
+                 version = EXCLUDED.version, model = EXCLUDED.model,
+                 payload = EXCLUDED.payload, created_at = now()""",
+            (old_rcept_no, new_rcept_no, version, model, data),
+        )
+        self.conn.commit()
+
+    # --- 사용자별 알림 채널 ----------------------------------------------
+
+    def start_alert_channel(
+        self, user_id: int, kind: str, target: str | None, pending_hash: str, until
+    ) -> None:
+        """인증을 새로 시작한다. 인증이 끝날 때까지 이 채널로는 보내지 않는다."""
+        self.conn.execute(
+            """INSERT INTO user_alert_channels
+                 (user_id, kind, target, verified_at, pending_hash, pending_until)
+               VALUES (%s, %s, %s, NULL, %s, %s)
+               ON CONFLICT (user_id, kind) DO UPDATE SET
+                 target = EXCLUDED.target, verified_at = NULL, enabled = true,
+                 pending_hash = EXCLUDED.pending_hash, pending_until = EXCLUDED.pending_until""",
+            (user_id, kind, target, pending_hash, until),
+        )
+        self.conn.commit()
+
+    def confirm_alert_channel(
+        self, kind: str, pending_hash: str, target: str | None = None
+    ) -> int | None:
+        """인증 코드가 맞고 기한 안이면 채널을 켠다. target 이 있으면 그 값으로 바꾼다."""
+        row = self.conn.execute(
+            """UPDATE user_alert_channels SET
+                 verified_at = now(), pending_hash = NULL, pending_until = NULL,
+                 target = COALESCE(%s, target), enabled = true
+               WHERE kind = %s AND pending_hash = %s AND pending_until > now()
+               RETURNING user_id""",
+            (target, kind, pending_hash),
+        ).fetchone()
+        self.conn.commit()
+        return row[0] if row else None
+
+    def alert_channels(self, user_id: int) -> list[dict]:
+        cur = self.conn.execute(
+            """SELECT kind, target, verified_at IS NOT NULL AS verified, enabled,
+                      pending_until > now() AS pending
+               FROM user_alert_channels WHERE user_id = %s ORDER BY kind""",
+            (user_id,),
+        )
+        cols = [c.name for c in cur.description]
+        return [dict(zip(cols, r, strict=True)) for r in cur.fetchall()]
+
+    def set_alert_enabled(self, user_id: int, kind: str, enabled: bool) -> bool:
+        cur = self.conn.execute(
+            "UPDATE user_alert_channels SET enabled = %s WHERE user_id = %s AND kind = %s",
+            (enabled, user_id, kind),
+        )
+        self.conn.commit()
+        return cur.rowcount > 0
+
+    def disable_telegram_chat(self, chat_id: str) -> int:
+        cur = self.conn.execute(
+            """UPDATE user_alert_channels SET enabled = false
+               WHERE kind = 'telegram' AND target = %s""",
+            (chat_id,),
+        )
+        self.conn.commit()
+        return cur.rowcount
+
+    def remove_alert_channel(self, user_id: int, kind: str) -> bool:
+        cur = self.conn.execute(
+            "DELETE FROM user_alert_channels WHERE user_id = %s AND kind = %s", (user_id, kind)
+        )
+        self.conn.commit()
+        return cur.rowcount > 0
+
+    def user_pending_alerts(self, max_age_days: int = 3) -> list[dict]:
+        """인증된 채널이 있는 사용자의 관심 종목 공시 중 아직 안 보낸 것.
+
+        채널을 켠 직후 예전 공시가 한꺼번에 가지 않게 최근 며칠 것만 본다."""
+        cur = self.conn.execute(
+            """
+            SELECT ch.user_id, ch.kind, ch.target, d.rcept_no, d.corp_code, d.corp_name,
+                   d.report_nm, d.rcept_dt, d.event_label, d.importance, d.correction
+            FROM user_alert_channels ch
+            JOIN user_watchlist w ON w.user_id = ch.user_id
+            JOIN disclosures d ON d.corp_code = w.corp_code AND d.importance >= w.min_importance
+            WHERE ch.enabled AND ch.verified_at IS NOT NULL AND ch.target IS NOT NULL
+              AND d.seen_at >= w.added_at AND d.seen_at >= ch.verified_at - interval '1 day'
+              AND d.seen_at >= now() - make_interval(days => %s)
+              AND NOT EXISTS (SELECT 1 FROM user_notifications n
+                              WHERE n.user_id = ch.user_id AND n.rcept_no = d.rcept_no
+                                AND n.channel = ch.kind)
+            ORDER BY ch.user_id, ch.kind, d.importance DESC, d.rcept_dt, d.rcept_no
+            """,
+            (max_age_days,),
+        )
+        cols = [c.name for c in cur.description]
+        return [dict(zip(cols, r, strict=True)) for r in cur.fetchall()]
+
+    def mark_user_notified(self, user_id: int, rcept_nos: list[str], channel: str) -> None:
+        with self.conn.cursor() as cur:
+            cur.executemany(
+                """INSERT INTO user_notifications (user_id, rcept_no, channel)
+                   VALUES (%s, %s, %s) ON CONFLICT DO NOTHING""",
+                [(user_id, r, channel) for r in rcept_nos],
+            )
+        self.conn.commit()
