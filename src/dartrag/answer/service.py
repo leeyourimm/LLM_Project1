@@ -2,6 +2,7 @@
 
 import re
 from dataclasses import dataclass, field
+from typing import Protocol
 
 from dartrag.answer.llm import LLM
 from dartrag.answer.numbers import split_sentences, unverified_numbers
@@ -30,14 +31,30 @@ class Answer:
     warnings: list[str] = field(default_factory=list)
 
 
+class FinanceLookup(Protocol):
+    def lookup(self, question: str, flt: SearchFilter | None = None) -> SearchHit | None: ...
+
+
 class Answerer:
-    def __init__(self, retriever: HybridRetriever, llm: LLM, *, top_k: int = 8):
+    def __init__(
+        self,
+        retriever: HybridRetriever,
+        llm: LLM,
+        *,
+        finance: FinanceLookup | None = None,
+        top_k: int = 8,
+    ):
         self.retriever = retriever
         self.llm = llm
+        self.finance = finance
         self.top_k = top_k
 
     def answer(self, question: str, flt: SearchFilter | None = None) -> Answer:
-        hits = self.retriever.search(question, flt, self.top_k)
+        # 재무 수치 질문이면 재무 DB 조회·계산 결과를 첫 번째 출처로 넣는다
+        fin = self.finance.lookup(question, flt) if self.finance else None
+        hits = self.retriever.search(question, flt, self.top_k - (1 if fin else 0))
+        if fin:
+            hits = [fin, *hits]
         if not hits:
             return Answer(question, NOT_FOUND, found=False)
         text = self.llm.chat(build_messages(question, hits))

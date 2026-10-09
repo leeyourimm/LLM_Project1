@@ -252,3 +252,32 @@ class Repository:
             d["url"] = f"https://dart.fss.or.kr/dsaf001/main.do?rcpNo={d['rcept_no']}"
             out[d["chunk_id"]] = d
         return out
+
+    def listed_companies(self) -> list[tuple[str, str]]:
+        rows = self.conn.execute(
+            "SELECT corp_code, corp_name FROM companies WHERE stock_code IS NOT NULL"
+        ).fetchall()
+        return [(r[0], r[1]) for r in rows]
+
+    def financial_rows(
+        self,
+        corp_codes: list[str],
+        reprt_code: str,
+        sj_divs: tuple[str, ...],
+        account_ids: tuple[str, ...],
+        account_names: tuple[str, ...],
+    ):
+        """지표 후보 계정 행. 어느 행을 쓸지는 finance.tool.pick_values 가 고른다."""
+        from dartrag.finance import FinancialRow
+
+        rows = self.conn.execute(
+            """
+            SELECT corp_code, bsns_year, fs_div, account_id,
+                   regexp_replace(account_nm, '\\s', '', 'g') AS nm, amount, rcept_no, ord
+            FROM financial_items
+            WHERE corp_code = ANY(%s) AND reprt_code = %s AND sj_div = ANY(%s)
+              AND (account_id = ANY(%s) OR regexp_replace(account_nm, '\\s', '', 'g') = ANY(%s))
+            """,
+            (corp_codes, reprt_code, list(sj_divs), list(account_ids), list(account_names)),
+        ).fetchall()
+        return [FinancialRow(*r) for r in rows]

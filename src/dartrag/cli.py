@@ -121,7 +121,8 @@ def _retriever(stocks, year_from, year_to):
         raise typer.Exit(1)
     embedder, vector, keyword = _search_backends(settings)
     retriever = HybridRetriever(embedder, vector, keyword, repo.get_chunks)
-    return retriever, SearchFilter(corp_codes=corp_codes, year_from=year_from, year_to=year_to)
+    flt = SearchFilter(corp_codes=corp_codes, year_from=year_from, year_to=year_to)
+    return retriever, flt, repo
 
 
 @app.command()
@@ -151,7 +152,7 @@ def search(
     limit: int = 5,
 ):
     """하이브리드 검색 결과 확인 (답변 생성 없이 근거 청크만)."""
-    retriever, flt = _retriever(stocks, year_from, year_to)
+    retriever, flt, _ = _retriever(stocks, year_from, year_to)
     hits = retriever.search(query, flt, limit)
     if not hits:
         typer.echo("결과 없음")
@@ -176,10 +177,15 @@ def ask(
 ):
     """공시를 근거로 질문에 답하기 (출처 번호 포함)."""
     from dartrag.answer import Answerer, LLMError, OllamaLLM
+    from dartrag.finance import FinanceTool
 
     settings = get_settings()
-    retriever, flt = _retriever(stocks, year_from, year_to)
-    answerer = Answerer(retriever, OllamaLLM(settings.llm_model, settings.ollama_url))
+    retriever, flt, repo = _retriever(stocks, year_from, year_to)
+    answerer = Answerer(
+        retriever,
+        OllamaLLM(settings.llm_model, settings.ollama_url),
+        finance=FinanceTool(repo),
+    )
     try:
         result = answerer.answer(question, flt)
     except LLMError as e:
