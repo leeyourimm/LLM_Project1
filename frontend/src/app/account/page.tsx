@@ -1,6 +1,5 @@
 "use client";
 
-import { useRouter } from "next/navigation";
 import { useState } from "react";
 import { useApp } from "@/components/providers";
 import { ErrorBox, PageTitle } from "@/components/ui";
@@ -154,8 +153,6 @@ function ExportCard() {
 }
 
 function DeleteAccount() {
-  const { refreshAuth } = useApp();
-  const router = useRouter();
   const [password, setPassword] = useState("");
   const [confirm, setConfirm] = useState(false);
   const [busy, setBusy] = useState(false);
@@ -171,8 +168,9 @@ function DeleteAccount() {
         setError(null);
         try {
           await del("/api/account", { password });
-          await refreshAuth();
-          router.replace("/login");
+          // 화면 상태를 새로 읽으면 로그인 확인이 먼저 돌아 /login?next=/account 로 가므로,
+          // 페이지를 새로 열어 깨끗한 로그인 화면으로 보낸다
+          window.location.replace("/login");
         } catch (err) {
           setError(err);
           setBusy(false);

@@ -100,6 +100,8 @@ class Settings(BaseSettings):
     langfuse_public_key: str = ""
     langfuse_secret_key: str = ""
     langfuse_sample_rate: float = 1.0
+    # 탈퇴할 때 그 사용자의 Langfuse 추적 삭제를 요청 (실패해도 탈퇴는 그대로 끝남)
+    langfuse_delete_on_account_delete: bool = True
 
 
 @lru_cache

@@ -40,6 +40,7 @@ from dartrag.web.insights import build_router as build_insights_router
 from dartrag.web.ratelimit import RateLimiter, Rule, make_dependency
 from dartrag.web.services import Services
 
+log = logging.getLogger(__name__)
 STATIC = pathlib.Path(__file__).parent / "static"
 log = logging.getLogger(__name__)
 
@@ -418,16 +419,29 @@ def create_app(services: Services, limiter: auth.LoginLimiter | None = None) -> 
         return {"ok": True}
 
     @api.delete("/api/account", dependencies=[rate("auth")])
-    def delete_account(req: AccountDelete, user: CurrentUser, response: Response):
-        """탈퇴: 지금 비밀번호를 확인하고 계정과 관심 종목, 알림 설정, 대화 기록을 모두 지운다."""
+    def delete_account(
+        req: AccountDelete, user: CurrentUser, response: Response, background: BackgroundTasks
+    ):
+        """탈퇴: 지금 비밀번호를 확인하고 계정과 관심 종목, 알림 설정, 대화 기록을 모두 지운다.
+
+        LLM 추적(Langfuse)에 남은 그 사용자 가명의 기록도 응답을 보낸 뒤 지우도록 요청한다.
+        """
         need_auth_mode()
         with services.repo() as repo:
             row = repo.user_by_email(user.email)
             if row is None or not auth.verify_password(req.password, row[2]):
                 raise HTTPException(401, "비밀번호가 맞지 않습니다")
             repo.delete_user(user.id)
+        if services.tracer is not None:
+            background.add_task(forget_traces, user.id)
         clear_session_cookie(response)
         return {"ok": True}
+
+    def forget_traces(user_id: int) -> None:
+        try:
+            services.tracer().forget_user(user_id)
+        except Exception as e:  # noqa: BLE001 - 추적 삭제 실패로 탈퇴 응답이 깨지면 안 된다
+            log.warning("탈퇴 후 추적 삭제 실패: %s", type(e).__name__)
 
     @api.get("/api/account/export", dependencies=[rate("heavy")])
     def export_account(user: CurrentUser):

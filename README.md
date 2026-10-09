@@ -8,16 +8,21 @@ AWS 서버 한 대에 배포하는 방법은 [docs/terraform.md](docs/terraform.
 > 이 서비스는 공시 정보의 검색·요약을 제공하며 투자 권유가 아닙니다.
 
 ## 진행 상황
+기능은 모두 코드로 만들었고, 남은 일은 실제 OpenDART 데이터로 검증하는 것(2026-10-12 이후)과 공개입니다.
+
 | 단계 | 내용 | 상태 |
 |---|---|---|
 | 0. 기반 | 저장소, Docker 인프라, CI, OpenDART 수집기, 재무 DB | ✅ |
-| 1. 핵심 RAG | 파싱, 청킹, 하이브리드 검색, 출처 답변 ✅ / 실데이터 검증 | 🔶 |
-| 2. 정확도 | 숫자·인용 검증기, 재무 DB 조회, 계산기 ✅ / 실데이터 검증 | 🔶 |
-| 3. 평가 체계 | 채점기, 문항 자동 생성 ✅ / 실데이터 300문항, 정기 회귀 검사 | 🔶 |
-| 4. 변화 추적 | 보고서 변경점 비교, 주요 공시 피드, 알림 | ✅ |
-| 5. 제품화 | 웹 화면, API, 회사 대시보드, 준비 점검·일괄 실행, 로그인 ✅ / 리포트 | 🔶 |
-| 6. 확장 | 전 상장사, 신규 공시 30분 반영 | ⬜ |
-| 7. 공개 | 보안 점검, 법적 고지, 베타 공개 | ⬜ |
+| 1. 핵심 RAG | 파싱, 청킹, 하이브리드 검색, 출처 답변, 대화, 검색 품질 개선 | ✅ |
+| 2. 정확도 | 숫자·인용 검증기, 재무 DB 조회, 계산기 | ✅ |
+| 3. 평가 체계 | 채점기, 문항 자동 생성, 배포 기준(릴리스 게이트) | ✅ |
+| 4. 변화 추적 | 변경점 비교, LLM 변경점 요약, 공시 피드, 이메일·텔레그램 알림 | ✅ |
+| 5. 제품화 | Next.js 화면, API, 회사 대시보드, 기업 비교, PDF 리포트, 로그인·계정 | ✅ |
+| 6. 확장 | Celery 작업자, 전 상장사 수집, 신규 공시 30분 반영 파이프라인 | ✅ |
+| 7. 운영 | 관측(지표·Langfuse·Sentry), 보안 점검, Docker·HTTPS 배포, Terraform, 브라우저 종단 테스트 | ✅ |
+| 실데이터 검증 | OpenDART 실데이터로 수집·답변·수치·알림 확인 (2026-10-12 이후) | ⬜ |
+| 평가셋 | 실데이터로 만든 300문항, 정기 회귀 검사 기준선 | ⬜ |
+| 공개 | 베타 공개 | ⬜ |
 
 ## 한 번에 실행하기
 처음 한 번은 아래 "빠른 시작"의 1, 2번으로 설치를 먼저 하세요. 그다음부터는 Docker Desktop과 Ollama 앱을 켠 뒤, 프로젝트 폴더에서 아래 두 줄을 차례로 실행하면 됩니다.
@@ -176,7 +181,7 @@ dartrag ask "2024년 HBM 매출 비중은?" -s 005930
 - **운영 관측과 품질 관리** (`obs/`, `eval/gate.py`, `infra/monitoring/`):
   - 지표: API 서버의 `/metrics`에 요청 수·응답 시간, 답변 결과(답함·못 찾음·거절·캐시·실패), 검색·첫 글자·생성 단계별 시간, 토큰 수, 👍/👎, 요청 한도 초과, 작업자 상태, 처리 대기, 데이터 검증 오류, OpenDART 사용량, 최근 평가 결과를 내보냅니다.
   - 대시보드: `docker compose -f infra/docker-compose.yml --profile monitoring up -d` 후 http://localhost:3002 (Grafana, 처음 계정 admin/admin). 경보 규칙 11개(API 멈춤, 답변 실패 급증, 피드 1시간 이상 멈춤, OpenDART 한도 90% 등)가 들어 있습니다.
-  - LLM 추적: `--profile langfuse`로 Langfuse를 띄우고 `.env`에 `LANGFUSE_HOST=http://localhost:3001`을 넣으면 질문마다 검색 결과, 모델에 보낸 내용, 답변, 토큰, 첫 글자까지 걸린 시간이 http://localhost:3001 에 남습니다(처음 계정 admin@dartrag.local / dartrag-admin). 메모리를 2~3GB 더 씁니다.
+  - LLM 추적: `--profile langfuse`로 Langfuse를 띄우고 `.env`에 `LANGFUSE_HOST=http://localhost:3001`을 넣으면 질문마다 검색 결과, 모델에 보낸 내용, 답변, 토큰, 첫 글자까지 걸린 시간이 http://localhost:3001 에 남습니다(처음 계정 admin@dartrag.local / dartrag-admin). 메모리를 2~3GB 더 씁니다. 사용자·대화 번호는 `SECRET_KEY`로 만든 가명으로만 보내고, 탈퇴하면 그 가명의 추적 삭제를 요청합니다. 보관 기간 30일은 Langfuse 프로젝트 설정에서 정합니다([docs/deploy.md](docs/deploy.md) 11절).
   - 오류 수집: `.env`에 `SENTRY_DSN`을 넣으면 API와 작업자의 오류가 Sentry로 갑니다. 질문 내용, 이메일, 쿠키, 지역 변수는 보내기 전에 지웁니다.
   - 요청 한도: 질문은 사용자마다 1분 6번·하루 200번, 비교 설명·변경점 요약 새로 만들기·요약 PDF는 1시간 10번이 기본입니다. 넘으면 429와 다시 시도할 시간을 돌려줍니다.
   - 배포 기준: `eval/release_criteria.toml`에 통과율·검색 적중률·출처 표시율·숫자 확인 실패율·응답 시간 기준과 기준선 대비 하락 허용폭이 있습니다. `dartrag eval run ... --gate`가 기준 미달이면 실패하고, 결과를 `dartrag eval baseline`으로 `eval/baseline.json`에 저장해 올리면 CI가 그 기준선과 프롬프트 버전을 검사합니다.
@@ -191,4 +196,12 @@ dartrag ask "2024년 HBM 매출 비중은?" -s 005930
 ```bash
 make test     # 단위 테스트 (DB 통합 테스트는 TEST_DATABASE_URL 이 있을 때만)
 make lint
+```
+
+브라우저 종단 테스트(Playwright)는 실제 API 서버(가짜 검색·언어 모델)와 테스트용 Postgres, `next start`를 띄워 가입 → 로그인 → 질문 → 내 데이터 내려받기 → 탈퇴와 로그인 뒤 돌아갈 주소 검사를 Chromium으로 확인합니다. CI의 `e2e` 작업이 같은 것을 돌립니다.
+```bash
+cd frontend
+npx playwright install chromium   # 처음 한 번
+API_ORIGIN=http://127.0.0.1:8765 npm run build
+E2E_DATABASE_URL=postgresql://dartrag:dartrag@localhost:5432/dartrag_e2e npm run e2e
 ```

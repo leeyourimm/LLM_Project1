@@ -8,8 +8,6 @@ ARG PYTHON_VERSION=3.12
 # --- 1단계: 패키지 설치 (컴파일 도구와 내려받은 파일은 최종 이미지에 남지 않는다) ---
 FROM python:${PYTHON_VERSION}-slim AS builder
 
-# ops: 오류 수집(Sentry), embed: 질문·문서 임베딩(bge-m3)
-ARG EXTRAS=ops,embed
 # CPU 전용 PyTorch. GPU 판(PyPI 기본)은 수 GB 더 크다. 비우면 PyPI 기본판을 쓴다
 ARG TORCH_INDEX_URL=https://download.pytorch.org/whl/cpu
 
@@ -19,17 +17,24 @@ ENV PIP_NO_CACHE_DIR=1 \
 
 RUN python -m venv /opt/venv
 
-# PyTorch 는 크고 자주 바뀌지 않으므로 따로 설치해 빌드 캐시를 살린다
-RUN case ",${EXTRAS}," in \
-      *,embed,*) if [ -n "${TORCH_INDEX_URL}" ]; then \
-                   pip install torch --index-url "${TORCH_INDEX_URL}"; \
-                 fi ;; \
-    esac
-
 WORKDIR /src
+# 버전은 requirements/ 잠금 파일(ops+embed)로 고정한다. 갱신 방법은 docs/deploy.md 참고
+
+# PyTorch 는 크고 자주 바뀌지 않으므로 따로 설치해 빌드 캐시를 살린다.
+# 버전만 고정한다(CPU 색인 파일의 해시는 잠금 파일에 없다). 의존 패키지는 아래 잠금 파일에서 받는다
+COPY requirements/torch.txt ./requirements/
+RUN if [ -n "${TORCH_INDEX_URL}" ]; then \
+      pip install --no-deps -r requirements/torch.txt --index-url "${TORCH_INDEX_URL}"; \
+    else \
+      pip install -r requirements/torch.txt; \
+    fi
+
+# 나머지는 해시까지 확인해 설치하고, 우리 패키지는 의존성을 다시 풀지 않고 넣는다
+COPY requirements/runtime.txt ./requirements/
+RUN pip install --no-deps --require-hashes -r requirements/runtime.txt
 COPY pyproject.toml ./
 COPY src ./src
-RUN pip install ".[${EXTRAS}]"
+RUN pip install --no-deps . && pip check
 
 # --- 2단계: 실행 이미지 ---
 FROM python:${PYTHON_VERSION}-slim

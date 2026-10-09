@@ -23,16 +23,42 @@ jobs:
     env:
       TEST_DATABASE_URL: postgresql://dartrag:dartrag@localhost:5432/dartrag_test
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.12"
-      - run: pip install -e ".[dev]"
+          cache: pip
+          cache-dependency-path: requirements/dev.txt
+      # 잠금 파일(requirements/dev.txt)의 버전·해시 그대로 설치한다
+      - run: pip install --no-deps --require-hashes -r requirements/dev.txt
+      - run: pip install --no-deps -e . && pip check
       - run: ruff check .
       - run: ruff format --check .
       - run: pytest -q
       # 프롬프트·모델을 바꾸면 실제 평가 결과(eval/baseline.json)도 함께 올려야 통과
       - run: dartrag eval ci-check
+
+  # 알려진 취약점이 있는 의존성 검사 (잠금 파일 기준)
+  audit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+      - run: pip install pip-audit==2.10.1
+      # PyPI 취약점 정보에는 심각도가 없어, 알려진 취약점이 하나라도 있으면 실패한다
+      - name: Python 의존성 (pip-audit)
+        run: |
+          pip-audit --strict --disable-pip --require-hashes -r requirements/runtime.txt -r requirements/dev.txt
+          pip-audit --strict --disable-pip --no-deps -r requirements/torch.txt
+      - uses: actions/setup-node@v7
+        with:
+          node-version: "22"
+      # 배포물에 들어가는 패키지만 보고, high·critical 이 있으면 실패
+      - name: 웹 화면 의존성 (npm audit)
+        working-directory: frontend
+        run: npm audit --omit=dev --audit-level=high
 
   terraform:
     runs-on: ubuntu-latest
@@ -40,8 +66,8 @@ jobs:
       run:
         working-directory: infra/terraform
     steps:
-      - uses: actions/checkout@v4
-      - uses: hashicorp/setup-terraform@v3
+      - uses: actions/checkout@v7
+      - uses: hashicorp/setup-terraform@v4
         with:
           terraform_version: "1.16.5"
       - run: terraform fmt -check -recursive
@@ -55,8 +81,8 @@ jobs:
       run:
         working-directory: frontend
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
         with:
           node-version: "22"
           cache: npm
@@ -68,12 +94,64 @@ jobs:
         env:
           NEXT_TELEMETRY_DISABLED: "1"
 
+  # 브라우저 종단 테스트: 실제 FastAPI(가짜 검색·언어 모델) + Postgres + next start 를 Chromium 으로
+  # 가입 → 로그인 → 질문 → 내 데이터 내려받기 → 탈퇴, 로그인 뒤 돌아갈 주소 검사
+  e2e:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: dartrag
+          POSTGRES_PASSWORD: dartrag
+          POSTGRES_DB: dartrag_e2e
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U dartrag -d dartrag_e2e"
+          --health-interval 5s
+          --health-retries 10
+    env:
+      E2E_DATABASE_URL: postgresql://dartrag:dartrag@localhost:5432/dartrag_e2e
+      NEXT_TELEMETRY_DISABLED: "1"
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+      - run: pip install --no-deps --require-hashes -r requirements/dev.txt
+      - run: pip install --no-deps -e . && pip check
+      - uses: actions/setup-node@v7
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - run: npm ci
+        working-directory: frontend
+      # /api 를 테스트용 백엔드(8765)로 넘기도록 빌드
+      - run: npm run build
+        working-directory: frontend
+        env:
+          API_ORIGIN: http://127.0.0.1:8765
+      - run: npx playwright install --with-deps chromium
+        working-directory: frontend
+      - run: npm run e2e
+        working-directory: frontend
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: playwright-report
+          path: |
+            frontend/playwright-report
+            frontend/test-results
+          retention-days: 7
+
   # 배포 이미지가 빌드되는지, 배포용 compose·Caddyfile 이 올바른지 확인 (이미지는 올리지 않음)
   docker:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: docker/setup-buildx-action@v3
+      - uses: actions/checkout@v7
+      - uses: docker/setup-buildx-action@v4
       - name: 배포 compose 검사
         run: |
           cp infra/prod/.env.example infra/prod/.env
@@ -81,7 +159,7 @@ jobs:
       - name: Caddyfile 검사
         run: docker compose -f infra/prod/docker-compose.yml run --rm --no-deps caddy caddy validate --config /etc/caddy/Caddyfile
       - name: 백엔드 이미지
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@v7
         with:
           context: .
           push: false
@@ -89,7 +167,7 @@ jobs:
           cache-from: type=gha,scope=backend
           cache-to: type=gha,scope=backend,mode=max
       - name: 웹 화면 이미지
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@v7
         with:
           context: frontend
           push: false
