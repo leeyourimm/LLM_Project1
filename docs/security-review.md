@@ -54,8 +54,8 @@
 | A9 | 정보 | `src/dartrag/feed/alerts.py:72` | 구독 취소 HMAC 토큰에 만료가 없다. | 메일 앱 원클릭 구독 취소(RFC 8058) 관행이다. 토큰으로 할 수 있는 일은 그 채널 알림 끄기뿐이다. 비교는 `hmac.compare_digest`, 비밀값이 없으면 항상 거절한다. |
 | A10 | 낮음 | `src/dartrag/dart/client.py:201` | 고유번호 목록 XML 을 lxml 기본 파서로 읽는다. | lxml 5 기본값은 외부 엔티티·네트워크 접근을 막고, 내용은 HTTPS 로 받은 OpenDART 응답이다. 공시 원문 파서는 `resolve_entities=False` 를 쓴다. |
 | A11 | 중간 | `infra/docker-compose.yml:15,64,91` | 개발용 compose 에 기본 비밀번호(Postgres `dartrag`, Grafana `admin`, Langfuse 암호화 키 0…)가 있다. | 개발용이며 이제 모든 포트가 127.0.0.1 에만 열린다. 공개 서버 설정은 `infra/prod/` 에서 비밀값을 바꿔 쓴다 (범위 밖, 따로 확인 필요). |
-| A12 | 낮음 | `pyproject.toml:6` | Python 의존성은 하한만 있고 잠금 파일이 없다. 이 환경에서 `pip-audit` 를 돌리지 못했다. | 배포 이미지에서 버전을 고정(잠금 파일 또는 `pip freeze`)하고 CI 에 `pip-audit` 를 넣는 것을 권장한다. |
-| A13 | 낮음 | `frontend/package.json:24` | 개발용 vitest 3.2.4 가 쓰는 tinypool·@vitest/mocker 에 알려진 취약점이 있다. | 테스트 도구라 배포물에 들어가지 않고, 우리 테스트 코드만 실행한다. 고치려면 vitest 5 로 메이저 업그레이드가 필요해 따로 진행한다. |
+| A12 | 낮음 | `pyproject.toml:6` | Python 의존성은 하한만 있고 잠금 파일이 없다. 이 환경에서 `pip-audit` 를 돌리지 못했다. | 고침: `requirements/` 에 해시까지 고정한 잠금 파일(배포용 `runtime.txt`·`torch.txt`, CI용 `dev.txt`)을 두고 `make lock`(uv)으로 만든다. 백엔드 이미지와 CI 는 `--require-hashes` 로 잠금 파일에서만 설치한다. CI `audit` 작업이 `pip-audit` 로 잠금 파일을 검사하고, 알려진 취약점이 있으면 실패한다. PyTorch 는 CPU 전용 색인에서 받아 버전만 고정한다(해시 없음). Dependabot 이 매주 업데이트 PR 을 연다. |
+| A13 | 낮음 | `frontend/package.json:24` | 개발용 vitest 3.2.4 가 쓰는 tinypool·@vitest/mocker 에 알려진 취약점이 있다. | 고침: vitest 5.0.3 으로 올리고 peer 의존성인 vite 8 을 명시했다. `npm audit` 결과 0건. CI `audit` 작업이 `npm audit --omit=dev --audit-level=high` 로 배포물 패키지를 검사한다. |
 | A14 | 정보 | `src/dartrag/answer/guard.py:19` | 인젝션 거절은 규칙(정규식) 기반이라 새 표현은 놓친다. | 구조적 방어가 함께 있다: 모델에 도구·DB 권한이 없고 출력은 화면에 텍스트로만 나가며, 원문은 태그 안 자료로만 다루고, 인용·숫자 검증이 붙는다. 적대적 문항은 배포 기준(95%)으로 계속 잰다. |
 | A15 | 정보 | `src/dartrag/web/alerts.py:51` | 인증 메일 재전송 제한(60초)이 프로세스 메모리에 있다. | 같은 사용자의 주소로만 보내므로 남용 피해가 작고, 서버는 한 대로 운영한다. |
 
@@ -78,4 +78,4 @@
 - **로그인 보호**: 2단계 인증, 새 기기 로그인 알림, 비밀번호 재설정(메일) 기능이 없다. 비밀번호를 잊으면 운영자가 `dartrag user password` 로 바꿔야 한다.
 - **LLM 출력**: 근거 규칙과 경고가 있어도 답변이 틀릴 수 있다. 화면마다 "투자 권유 아님" 고지를 유지한다.
 - **비밀값 보관**: `.env` 평문 파일에 OpenDART 키, 봇 토큰, SMTP 비밀번호, `SECRET_KEY` 가 있다. 서버에서는 파일 권한을 600 으로 두고, 가능하면 비밀값 관리 서비스를 쓴다.
-- **의존성**: Python 의존성 취약점 점검(A12)과 vitest 메이저 업그레이드(A13)가 남아 있다.
+- **의존성**: 잠금 파일과 CI 취약점 검사(A12), vitest 5 업그레이드(A13)로 고쳤다. 남은 것: PyTorch CPU 판은 해시를 고정하지 않았고, `pip-audit` 는 심각도를 구분하지 못해 낮은 등급 취약점에도 실패한다(필요하면 `--ignore-vuln` 으로 근거와 함께 예외를 둔다).
