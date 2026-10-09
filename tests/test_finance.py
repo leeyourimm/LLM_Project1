@@ -88,6 +88,9 @@ class FakeRepo:
     def listed_companies(self):
         return COMPANIES
 
+    def quarter_rows(self, corp_code, sj_divs, account_ids, account_names):
+        return [r for r in self.rows if r.corp_code == corp_code and r.account_id in account_ids]
+
     def financial_rows(self, corp_codes, reprt_code, sj_divs, account_ids, account_names):
         self.calls.append((tuple(corp_codes), reprt_code, sj_divs))
         return [r for r in self.rows if r.corp_code in corp_codes and (r.account_id in account_ids)]
@@ -182,3 +185,42 @@ def test_company_series():
     assert series[1].growth == {}  # 2021 이 없음
     assert series[2].growth["operating_income"] is None  # 2022 영업이익 없음
     assert company_series(FakeRepo([]), SAMSUNG) == []
+
+
+def qrow(year, reprt, amount, add=None, aid="ifrs-full_Revenue"):
+    return FinancialRow(SAMSUNG, year, "CFS", aid, "x", amount, "r", None, reprt, add)
+
+
+def test_quarterly_series_derives_q4():
+    from dartrag.finance.series import quarterly_series
+
+    rows = [
+        qrow(2024, "11013", 71),
+        qrow(2024, "11012", 74),
+        qrow(2024, "11014", 79, add=224),
+        qrow(2024, "11011", 300),
+        # 2023: 3분기 누적이 없으면 1~3분기 합으로 계산
+        qrow(2023, "11013", 63),
+        qrow(2023, "11012", 60),
+        qrow(2023, "11014", 67),
+        qrow(2023, "11011", 259),
+        qrow(2022, "11011", 302),  # 분기 자료가 없으면 4분기도 못 구함
+        qrow(2024, "11013", 6, aid="dart_OperatingIncomeLoss"),
+    ]
+    pts = quarterly_series(FakeRepo(rows), SAMSUNG, quarters=8)
+    assert [p.label for p in pts] == [f"{y} {q}Q" for y in (2023, 2024) for q in (1, 2, 3, 4)]
+    q4_24 = pts[-1]
+    assert q4_24.values["revenue"] == 76 and q4_24.derived == ["revenue"]
+    assert pts[3].values["revenue"] == 259 - (63 + 60 + 67)
+    assert pts[4].values["operating_income"] == 6 and pts[5].values["operating_income"] is None
+
+
+def test_compare_table_uses_common_year():
+    from dartrag.finance.series import YearPoint, compare_table
+
+    a = [YearPoint(2023), YearPoint(2024)]
+    b = [YearPoint(2022), YearPoint(2023)]
+    t = compare_table({"A": a, "B": b, "C": []})
+    assert t["year"] == 2023 and t["points"]["A"].year == 2023 and t["points"]["C"] is None
+    t = compare_table({"A": [YearPoint(2024)], "B": [YearPoint(2020)]})
+    assert t["year"] is None and t["points"]["B"].year == 2020

@@ -22,6 +22,7 @@ class Services:
     allow_signup: bool = True
     cookie_secure: bool = False
     session_days: int = 30
+    report_font: str | None = None  # PDF 리포트용 한글 TTF 경로 (없으면 자동 탐색)
 
 
 def default_services(settings: Settings) -> Services:
@@ -45,4 +46,5 @@ def default_services(settings: Settings) -> Services:
         allow_signup=settings.allow_signup,
         cookie_secure=settings.cookie_secure,
         session_days=settings.session_days,
+        report_font=settings.report_font,
     )

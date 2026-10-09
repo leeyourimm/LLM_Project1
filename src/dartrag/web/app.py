@@ -18,6 +18,7 @@ from dartrag.search import SearchFilter
 from dartrag.web import auth
 from dartrag.web.chat import DISCLAIMER, build_router
 from dartrag.web.chat import source_dict as _source
+from dartrag.web.insights import build_router as build_insights_router
 from dartrag.web.services import Services
 
 STATIC = pathlib.Path(__file__).parent / "static"
@@ -326,6 +327,7 @@ def create_app(services: Services, limiter: auth.LoginLimiter | None = None) -> 
         }
 
     api.include_router(build_router(services, CurrentUser, corp_codes))
+    api.include_router(build_insights_router(services))
     app.include_router(api)
     app.mount("/static", StaticFiles(directory=STATIC), name="static")
 

@@ -103,20 +103,53 @@ class FakeRepo:
         body = "환율 위험" if rcept_no == "old" else "환율 위험\n관세 위험"
         return [(f"{rcept_no}.xml", 0, ["위험관리"], body)]
 
+    COMPANIES = {
+        "005930": ("00126380", "삼성전자", "005930"),
+        "000660": ("00164779", "SK하이닉스", "000660"),
+    }
+    FIN = {
+        "00126380": {
+            "ifrs-full_Revenue": {2023: 258_935_494_000_000, 2024: 300_870_903_000_000},
+            "dart_OperatingIncomeLoss": {2023: 6_566_976_000_000, 2024: 32_725_961_000_000},
+        },
+        "00164779": {
+            "ifrs-full_Revenue": {2024: 66_192_960_000_000, 2025: 90_000_000_000_000},
+        },
+    }
+
     def company_by_stock(self, stock):
-        return ("00126380", "삼성전자", "005930") if stock == "005930" else None
+        return self.COMPANIES.get(stock)
 
     def financial_rows(self, corp_codes, reprt_code, sj_divs, account_ids, account_names):
         from dartrag.finance import FinancialRow
 
-        data = {
-            "ifrs-full_Revenue": {2023: 258_935_494_000_000, 2024: 300_870_903_000_000},
-            "dart_OperatingIncomeLoss": {2023: 6_566_976_000_000, 2024: 32_725_961_000_000},
-        }
         return [
-            FinancialRow("00126380", y, "CFS", aid, "x", amt, f"rcpt{y}")
+            FinancialRow(code, y, "CFS", aid, "x", amt, f"rcpt{y}")
+            for code in corp_codes
             for aid in account_ids
-            for y, amt in data.get(aid, {}).items()
+            for y, amt in self.FIN.get(code, {}).get(aid, {}).items()
+        ]
+
+    def quarter_rows(self, corp_code, sj_divs, account_ids, account_names):
+        from dartrag.finance import FinancialRow
+
+        if "ifrs-full_Revenue" not in account_ids or corp_code != "00126380":
+            return []
+        q = {"11013": (70, 70), "11012": (75, 145), "11014": (80, 225), "11011": (300, None)}
+        return [
+            FinancialRow(
+                corp_code,
+                2024,
+                "CFS",
+                "ifrs-full_Revenue",
+                "x",
+                a * 10**12,
+                "r",
+                1,
+                code,
+                cum * 10**12 if cum else None,
+            )
+            for code, (a, cum) in q.items()
         ]
 
     def latest_filing_per_period(self, corp_code, kind):
@@ -308,6 +341,54 @@ def test_company_dashboard(ctx):
     assert client.get("/api/company/005930").json()["watched"] is True
     assert client.get("/api/company/000000").status_code == 404
     assert client.get("/api/company/abc").status_code == 422
+
+
+def test_company_quarters(ctx):
+    client, *_ = ctx
+    r = client.get("/api/company/005930/quarters").json()
+    labels = [q["label"] for q in r["quarters"]]
+    assert labels == ["2024 1Q", "2024 2Q", "2024 3Q", "2024 4Q"]
+    q4 = r["quarters"][-1]
+    assert q4["values"]["revenue"] == 75 * 10**12 and q4["derived"] == ["revenue"]
+    assert client.get("/api/company/000000/quarters").status_code == 404
+
+
+def test_compare(ctx):
+    client, *_ = ctx
+    r = client.get("/api/compare", params={"stocks": ["005930", "000660"]}).json()
+    assert r["year"] == 2024
+    names = [c["corp_name"] for c in r["companies"]]
+    assert names == ["삼성전자", "SK하이닉스"]
+    assert r["companies"][1]["point"]["values"]["revenue"] == 66_192_960_000_000
+    assert client.get("/api/compare", params={"stocks": ["005930"]}).status_code == 422
+    dup = client.get("/api/compare", params={"stocks": ["005930", "005930"]})
+    assert dup.status_code == 422
+    missing = client.get("/api/compare", params={"stocks": ["005930", "111111"]})
+    assert missing.status_code == 404
+
+
+def test_compare_summary(ctx):
+    client, _, answerer = ctx
+    r = client.post(
+        "/api/compare/summary", json={"stocks": ["005930", "000660"], "topic": "risk"}
+    ).json()
+    question, flt = answerer.calls[-1]
+    assert "삼성전자, SK하이닉스" in question and "위험 요인" in question
+    assert flt.corp_codes == ["00126380", "00164779"]
+    assert r["sources"][0]["cited"] is True and r["answer"].endswith("[1].")
+    bad = client.post("/api/compare/summary", json={"stocks": ["005930", "000660"], "topic": "x"})
+    assert bad.status_code == 422
+
+
+def test_report_pdf(ctx):
+    client, _, answerer = ctx
+    r = client.get("/api/company/005930/report.pdf")
+    assert r.status_code == 200 and r.headers["content-type"] == "application/pdf"
+    assert r.content.startswith(b"%PDF") and "filename*=UTF-8''" in r.headers["content-disposition"]
+    assert not answerer.calls
+    r = client.get("/api/company/005930/report.pdf", params={"llm": True})
+    assert r.status_code == 200 and len(answerer.calls) == 2
+    assert client.get("/api/company/000000/report.pdf").status_code == 404
 
 
 @pytest.fixture

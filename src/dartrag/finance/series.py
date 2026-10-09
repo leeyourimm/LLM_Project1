@@ -69,3 +69,81 @@ def company_series(repo, corp_code: str, years: int = 5) -> list[YearPoint]:
             a, b = cur.values[key], prev.values[key]
             cur.growth[key] = _num(growth(a, b)) if a is not None and b is not None else None
     return points
+
+
+# --- 분기 추이 ---------------------------------------------------------------
+# OpenDART 분기·반기 보고서의 손익 '당기금액'은 그 분기 3개월 값이고,
+# '누적금액'은 연초부터의 합이다.
+# 4분기는 따로 보고되지 않으므로 사업보고서(연간) − 3분기 누적으로 계산한다.
+
+QUARTER_REPORTS = {"11013": 1, "11012": 2, "11014": 3, "11011": 4}
+QUARTER_METRICS = ("revenue", "operating_income", "net_income")
+
+
+@dataclass
+class QuarterPoint:
+    year: int
+    quarter: int
+    values: dict[str, int | None] = field(default_factory=dict)
+    derived: list[str] = field(default_factory=list)  # 4분기처럼 계산으로 얻은 지표
+
+    @property
+    def label(self) -> str:
+        return f"{self.year} {self.quarter}Q"
+
+
+def quarterly_series(repo, corp_code: str, quarters: int = 12) -> list[QuarterPoint]:
+    picked = {}
+    for key in QUARTER_METRICS:
+        m = METRICS[key]
+        rows = repo.quarter_rows(
+            corp_code,
+            STATEMENT_SJ_DIV[m.statement],
+            m.account_ids,
+            tuple(n.replace(" ", "") for n in m.account_names),
+        )
+        picked[key] = pick_values(rows, m, key=lambda r: (r.bsns_year, r.reprt_code))
+    years = sorted({y for vs in picked.values() for (y, _) in vs})
+    points: list[QuarterPoint] = []
+    for y in years:
+        for q in (1, 2, 3, 4):
+            p = QuarterPoint(y, q)
+            for key in QUARTER_METRICS:
+                vals = picked[key]
+                if q < 4:
+                    code = next(c for c, n in QUARTER_REPORTS.items() if n == q)
+                    v = vals.get((y, code))
+                    p.values[key] = v.amount if v else None
+                    continue
+                annual, q3 = vals.get((y, "11011")), vals.get((y, "11014"))
+                cum3 = q3.add_amount if q3 and q3.add_amount is not None else None
+                if cum3 is None:
+                    parts = [vals.get((y, c)) for c in ("11013", "11012", "11014")]
+                    if all(parts):
+                        cum3 = sum(v.amount for v in parts)
+                if annual and cum3 is not None:
+                    p.values[key] = annual.amount - cum3
+                    p.derived.append(key)
+                else:
+                    p.values[key] = None
+            if any(v is not None for v in p.values.values()):
+                points.append(p)
+    return points[-quarters:]
+
+
+# --- 기업 비교 ---------------------------------------------------------------
+
+
+def compare_table(series_by_corp: dict[str, list[YearPoint]]) -> dict:
+    """여러 회사의 공통 최신 연도 지표. 공통 연도가 없으면 각자 최신 연도."""
+    year_sets = [{p.year for p in s} for s in series_by_corp.values() if s]
+    common = set.intersection(*year_sets) if year_sets else set()
+    year = max(common) if common else None
+    rows = {}
+    for corp, series in series_by_corp.items():
+        if not series:
+            rows[corp] = None
+            continue
+        point = next((p for p in series if p.year == year), None) if year else series[-1]
+        rows[corp] = point
+    return {"year": year, "points": rows}

@@ -346,6 +346,29 @@ class Repository:
         ).fetchall()
         return [FinancialRow(*r) for r in rows]
 
+    def quarter_rows(
+        self,
+        corp_code: str,
+        sj_divs: tuple[str, ...],
+        account_ids: tuple[str, ...],
+        account_names: tuple[str, ...],
+    ):
+        """분기 추이용: 사업·반기·분기 보고서의 후보 계정 행 (누적 금액 포함)."""
+        from dartrag.finance import FinancialRow
+
+        rows = self.conn.execute(
+            """
+            SELECT corp_code, bsns_year, fs_div, account_id,
+                   regexp_replace(account_nm, '\\s', '', 'g') AS nm, amount, rcept_no, ord,
+                   reprt_code, add_amount
+            FROM financial_items
+            WHERE corp_code = %s AND sj_div = ANY(%s)
+              AND (account_id = ANY(%s) OR regexp_replace(account_nm, '\\s', '', 'g') = ANY(%s))
+            """,
+            (corp_code, list(sj_divs), list(account_ids), list(account_names)),
+        ).fetchall()
+        return [FinancialRow(*r) for r in rows]
+
     def filing_info(self, rcept_no: str) -> dict | None:
         row = self.conn.execute(
             """SELECT f.rcept_no, f.report_nm, f.rcept_dt, c.corp_name, f.parsed_at IS NOT NULL

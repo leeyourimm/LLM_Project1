@@ -110,7 +110,7 @@ dartrag ask "2024년 HBM 매출 비중은?" -s 005930
 
 ## 5단계에서 한 것
 - **웹 화면** (`web/`): `dartrag serve` 후 http://127.0.0.1:8000 에서 질문하기(답변 속 [1]을 누르면 해당 출처 원문이 펼쳐짐, 숫자·출처 경고 표시), 공시 피드, 관심 종목 관리, 보고서 변경점 비교. 빌드 도구 없는 정적 HTML·JS라 Node 설치가 필요 없음. 다크 모드와 모바일 화면 지원
-- **API** (`/api/docs`에서 확인): `POST /api/ask`, `GET /api/search`, `GET /api/feed`, `GET·POST·DELETE /api/watchlist`, `GET /api/diff`, `GET /api/companies`. 임베딩 모델은 첫 질문 때 한 번만 올리고, DB 연결은 요청마다 따로 엶
+- **API** (`/api/docs`에서 확인): `POST /api/ask`, `GET /api/search`, `GET /api/feed`, `GET·POST·DELETE /api/watchlist`, `GET /api/diff`, `GET /api/companies`, `GET /api/compare`, `GET /api/company/{종목코드}/report.pdf`. 임베딩 모델은 첫 질문 때 한 번만 올리고, DB 연결은 요청마다 따로 엶
 
 - **회사 대시보드** (웹 "회사" 탭, `GET /api/company/{종목코드}`): 최근 연도 핵심 지표와 전년 대비 변화, 연도별 매출·이익 막대 차트, 이익률 꺾은선 차트(표로 보기 포함), 최근 90일 공시, 최근 사업보고서 변경점 요약. 숫자는 질문 답변과 같은 계정 선택 규칙을 씀
 - **로그인** (`web/auth.py`, `AUTH_REQUIRED=true`일 때만): 가입·로그인·로그아웃·비밀번호 변경, 사용자별 관심 종목, 로그인 시도 제한, 다른 사이트에서 보낸 요청 차단, 보안 헤더(CSP 등). 관리 명령 `dartrag user add/password/list/remove`
@@ -130,6 +130,14 @@ dartrag ask "2024년 HBM 매출 비중은?" -s 005930
   - 같은 질문은 Redis에서, 뜻이 거의 같은 질문은 질문 벡터로 찾아 바로 답합니다.
   - 숫자(연도 등)가 하나라도 다르면 캐시를 쓰지 않습니다. 회사가 정해지지 않은 질문은 뜻이 비슷한 질문을 찾는 캐시를 쓰지 않습니다.
   - 새 데이터를 색인하거나 프롬프트를 바꾸면 이전 캐시는 자동으로 무효가 됩니다.
+- **분기 실적과 기업 비교** (`finance/series.py`, `web/insights.py`):
+  - `GET /api/company/{종목코드}/quarters`: 분기별 매출·영업이익·순이익. 4분기는 따로 공시되지 않아 연간 금액에서 3분기 누적 금액을 빼서 계산하고 `derived`로 표시합니다.
+  - `GET /api/compare?stocks=005930&stocks=000660`: 2~5개 회사의 공통 최신 연도 지표와 연도별 추이.
+  - `POST /api/compare/summary`: 회사들의 공시 본문을 근거로 사업 구조(`business`), 위험 요인(`risk`), 투자 계획(`investment`)을 비교 설명합니다.
+- **PDF 리포트** (`report/`, `dartrag report -s 005930`, 웹 회사 탭의 "PDF 리포트"):
+  - 연간 재무 추이 표와 차트, 분기 실적, 사업 개요와 위험 요인 요약(근거 링크 포함), 직전 사업보고서 대비 변경점, 최근 주요 공시, 출처를 담습니다.
+  - 요약은 답변 모델을 쓰므로 오래 걸립니다. 웹에서는 기본으로 빼고(`?llm=true`로 포함), 명령에서는 기본으로 넣습니다(`--no-llm`으로 뺌).
+  - 한글 글꼴은 나눔고딕, 애플고딕, 맑은 고딕 순으로 찾아 PDF에 넣습니다. 다른 글꼴을 쓰려면 `.env`의 `REPORT_FONT`에 TTF 경로를 적습니다.
 - **준비 점검과 일괄 실행** (`dartrag doctor`, `dartrag run`): 위 "한 번에 실행하기" 참고. 인증키는 화면에 출력하지 않음
 
 ## 알려진 제한

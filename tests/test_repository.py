@@ -375,3 +375,20 @@ def test_expand_chunks_and_data_version(repo):
     repo.mark_indexed("20250311000001", 1, "m")
     repo.replace_financials("00126380", 2024, "11011", "CFS", [])
     assert repo.data_version() == 2
+
+
+def test_quarter_rows_include_report_code_and_cumulative(repo):
+    repo.upsert_companies([Corp(corp_code="00126380", corp_name="삼성전자", stock_code="005930")])
+    repo.replace_financials("00126380", 2024, "11011", "CFS", [item(400)])
+    repo.replace_financials(
+        "00126380",
+        2024,
+        "11014",
+        "CFS",
+        [item(90, reprt_code="11014", add_amount=300, rcept_no="20241114000001")],
+    )
+    rows = repo.quarter_rows(
+        "00126380", ("IS", "CIS"), ("dart_OperatingIncomeLoss",), ("영업이익",)
+    )
+    got = sorted((r.reprt_code, r.amount, r.add_amount) for r in rows)
+    assert got == [("11011", 400, None), ("11014", 90, 300)]
