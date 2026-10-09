@@ -174,3 +174,76 @@ jobs:
           tags: dartrag-frontend:ci
           cache-from: type=gha,scope=frontend
           cache-to: type=gha,scope=frontend,mode=max
+
+  # 운영 서버(Oracle Cloud Ampere A1)와 같은 linux/arm64 에서 에뮬레이션 없이 이미지를 만들고 띄워 본다
+  # (이미지는 올리지 않음). 빌드 캐시 범위는 x86 docker 작업과 겹치지 않게 -arm64 를 붙인다
+  docker-arm64:
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v7
+      - uses: docker/setup-buildx-action@v4
+      - name: 백엔드 이미지 (arm64)
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          platforms: linux/arm64
+          load: true
+          tags: dartrag-backend:arm64
+          cache-from: type=gha,scope=backend-arm64
+          cache-to: type=gha,scope=backend-arm64,mode=max
+      # CPU 전용 PyTorch(aarch64)와 C 확장 패키지(psycopg, lxml 등)가 실제로 불러와지는지
+      - name: 백엔드 실행 확인
+        run: |
+          docker run --rm dartrag-backend:arm64 python -c "
+          import platform, psycopg, torch, sentence_transformers
+          import dartrag, dartrag.web.app, dartrag.worker.celery_app
+          assert platform.machine() == 'aarch64', platform.machine()
+          assert torch.version.cuda is None, 'CUDA 판 PyTorch 가 설치됨'
+          assert psycopg.pq.__impl__ == 'binary', psycopg.pq.__impl__
+          x = torch.ones(2, 2)
+          print(platform.machine(), 'torch', torch.__version__, (x @ x).sum().item())
+          "
+          docker run --rm dartrag-backend:arm64 dartrag --help
+      - name: 웹 화면 이미지 (arm64)
+        uses: docker/build-push-action@v7
+        with:
+          context: frontend
+          platforms: linux/arm64
+          load: true
+          tags: dartrag-frontend:arm64
+          cache-from: type=gha,scope=frontend-arm64
+          cache-to: type=gha,scope=frontend-arm64,mode=max
+      - name: 웹 화면 실행 확인
+        run: |
+          docker run -d --name web -p 127.0.0.1:3000:3000 dartrag-frontend:arm64
+          for i in $(seq 30); do curl -fs -o /dev/null http://127.0.0.1:3000/ && break; sleep 1; done
+          curl -fsS -o /dev/null -w "GET / -> %{http_code}\n" http://127.0.0.1:3000/
+          docker rm -f web
+      - name: OpenSearch 이미지 (arm64)
+        uses: docker/build-push-action@v7
+        with:
+          context: infra/opensearch
+          platforms: linux/arm64
+          load: true
+          tags: dartrag-opensearch:arm64
+          cache-from: type=gha,scope=opensearch-arm64
+          cache-to: type=gha,scope=opensearch-arm64,mode=max
+      # 배포 compose 와 같은 설정으로 띄워 nori 한국어 형태소 분석기가 동작하는지 (띄어쓰기 단위보다 잘게 나뉘어야 함)
+      - name: OpenSearch 실행 확인
+        run: |
+          docker run -d --name os -p 127.0.0.1:9200:9200 \
+            -e discovery.type=single-node -e DISABLE_SECURITY_PLUGIN=true \
+            -e DISABLE_INSTALL_DEMO_CONFIG=true -e OPENSEARCH_JAVA_OPTS="-Xms512m -Xmx512m" \
+            dartrag-opensearch:arm64
+          for i in $(seq 90); do curl -fs -o /dev/null http://127.0.0.1:9200/_cluster/health && break; sleep 2; done
+          curl -fsS http://127.0.0.1:9200/_cat/plugins
+          curl -fsS -H "Content-Type: application/json" http://127.0.0.1:9200/_analyze \
+            -d '{"tokenizer": "nori_tokenizer", "text": "삼성전자의 사업보고서"}' \
+            | python3 -c "import json, sys; t = [x['token'] for x in json.load(sys.stdin)['tokens']]; print(t); assert len(t) > 2, t"
+          docker rm -f os
+      - name: 실패 시 컨테이너 로그
+        if: failure()
+        run: |
+          docker logs web || true
+          docker logs os || true
