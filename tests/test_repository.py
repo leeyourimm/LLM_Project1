@@ -17,7 +17,7 @@ pytestmark = pytest.mark.skipif(not URL, reason="TEST_DATABASE_URL 없음")
 @pytest.fixture
 def repo():
     conn = psycopg.connect(URL)
-    conn.execute("DROP TABLE IF EXISTS financial_items, filings, companies CASCADE")
+    conn.execute("DROP TABLE IF EXISTS chunks, financial_items, filings, companies CASCADE")
     conn.commit()
     r = Repository(conn)
     r.migrate()
@@ -69,3 +69,28 @@ def test_roundtrip(repo):
     repo.replace_financials("00126380", 2024, "11011", "CFS", [item(200)])
     rows = repo.conn.execute("SELECT amount FROM financial_items").fetchall()
     assert rows == [(200,)]
+
+
+def test_chunks_replace_and_parse_state(repo):
+    from dartrag.parsing import Chunk
+
+    repo.upsert_companies([Corp(corp_code="00126380", corp_name="삼성전자", stock_code="005930")])
+    filing = Filing(
+        corp_code="00126380",
+        corp_name="삼성전자",
+        report_nm="사업보고서 (2024.12)",
+        rcept_no="20250311000001",
+        rcept_dt=date(2025, 3, 11),
+    )
+    repo.upsert_filing(filing, parse_report_name(filing.report_nm), "11011", "documents/x.zip")
+    assert [r[0] for r in repo.filings_to_parse(1)] == ["20250311000001"]
+
+    def chunk(i):
+        return Chunk(f"c{i}", "text", ["I. 개요"], "ctx", f"body {i}", i)
+
+    repo.replace_chunks("20250311000001", "00126380", [("a.xml", [chunk(0), chunk(1)])], 1)
+    repo.replace_chunks("20250311000001", "00126380", [("a.xml", [chunk(2)])], 1)
+    rows = repo.conn.execute("SELECT chunk_id, section_path FROM chunks").fetchall()
+    assert rows == [("c2", ["I. 개요"])]
+    assert repo.filings_to_parse(1) == []
+    assert len(repo.filings_to_parse(2)) == 1  # 파서 버전이 오르면 다시 처리
