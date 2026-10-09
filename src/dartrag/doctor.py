@@ -217,12 +217,14 @@ def check_alerts(settings: Settings) -> Check:
             problems.append("사용자 알림 링크 서명에 SECRET_KEY(32자 이상)가 필요합니다")
         if settings.telegram_bot_token and not settings.telegram_bot_username:
             problems.append("텔레그램 연결 링크에 TELEGRAM_BOT_USERNAME 이 필요합니다")
+    problems += _push_problems(settings)
     channels = [
         name
         for name, on in [
             ("웹훅", settings.alert_webhook_url),
             ("텔레그램", settings.telegram_bot_token),
             ("이메일", settings.smtp_host),
+            ("웹 푸시", settings.vapid_private_key),
         ]
         if on
     ]
@@ -234,6 +236,33 @@ def check_alerts(settings: Settings) -> Check:
         "" if not problems else ".env 의 알림 설정을 확인하세요",
         required=False,
     )
+
+
+def _push_problems(settings: Settings) -> list[str]:
+    """웹 푸시(VAPID) 설정 점검. 키 값은 문구에 넣지 않는다."""
+    s = settings
+    if not (s.vapid_public_key or s.vapid_private_key):
+        return []
+    if not (s.vapid_public_key and s.vapid_private_key):
+        return [
+            "웹 푸시는 VAPID_PUBLIC_KEY 와 VAPID_PRIVATE_KEY 가 모두 필요합니다 (dartrag push keys)"
+        ]
+    from dartrag.feed.channels import WebPushSender
+
+    try:
+        WebPushSender(s.vapid_private_key, s.vapid_public_key, s.vapid_subject or s.public_url)
+    except ValueError as e:
+        return [str(e)]
+    problems = []
+    if not s.auth_required:
+        problems.append("웹 푸시는 로그인을 켰을 때(AUTH_REQUIRED=true)만 씁니다")
+    subject = s.vapid_subject or s.public_url
+    if s.environment == "production" and not subject.startswith(("mailto:", "https://")):
+        problems.append(
+            "VAPID_SUBJECT(비우면 PUBLIC_URL)는 mailto: 나 https:// 주소여야 합니다 "
+            "(애플 푸시 서비스가 거절)"
+        )
+    return problems
 
 
 def check_account_mail(settings: Settings) -> Check:
@@ -285,7 +314,9 @@ def security_problems(settings: Settings) -> list[str]:
             "https 로 서비스하면 COOKIE_SECURE=true 로 로그인 쿠키를 https 에만 보내세요"
         )
     if len(s.secret_key) < 32:
-        problems.append("SECRET_KEY 가 32자보다 짧습니다 (구독 취소 링크 서명)")
+        problems.append(
+            "SECRET_KEY 가 32자보다 짧습니다 (구독 취소 링크 서명, 2단계 인증 비밀값 암호화)"
+        )
     if not s.metrics_token:
         problems.append("METRICS_TOKEN 이 없어 /metrics 를 프록시에서 꼭 막아야 합니다")
     if s.telegram_webhook_secret and len(s.telegram_webhook_secret) < 16:

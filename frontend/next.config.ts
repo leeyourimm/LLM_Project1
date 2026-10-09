@@ -23,7 +23,11 @@ const config: NextConfig = {
   output: "standalone",
   poweredByHeader: false,
   async headers() {
-    return [{ source: "/((?!api/).*)", headers: SECURITY_HEADERS }];
+    return [
+      { source: "/((?!api/).*)", headers: SECURITY_HEADERS },
+      // 웹 푸시 서비스 워커(public/sw.js): 고친 파일이 바로 반영되게 캐시하지 않는다
+      { source: "/sw.js", headers: [{ key: "Cache-Control", value: "no-cache" }] },
+    ];
   },
   async rewrites() {
     return [{ source: "/api/:path*", destination: `${API_ORIGIN}/api/:path*` }];

@@ -5,6 +5,7 @@ import { useCallback, useEffect, useState } from "react";
 import { ErrorBox } from "@/components/ui";
 import { api, del, patch, post } from "@/lib/api";
 import type { AlertChannel, AlertSettings as Settings } from "@/lib/types";
+import { PushRow } from "./PushRow";
 
 const LABEL = { email: "이메일", telegram: "텔레그램" } as const;
 
@@ -100,6 +101,7 @@ export function AlertSettings() {
             </li>
           );
         })}
+        <PushRow s={s} ch={byKind.push} run={run} setNote={setNote} />
       </ul>
       {note ? (
         <p role="status" className="mt-2 text-sm">

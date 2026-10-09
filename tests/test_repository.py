@@ -19,8 +19,8 @@ def repo():
     conn = psycopg.connect(URL)
     conn.execute(
         "DROP TABLE IF EXISTS company_versions, eval_runs, data_issues, job_runs, backfill_state, "
-        "diff_summaries, "
-        "user_notifications, user_alert_channels, auth_tokens, user_devices, "
+        "diff_summaries, user_notifications, user_push_subscriptions, user_alert_channels, "
+        "auth_tokens, user_devices, login_challenges, user_recovery_codes, user_totp, "
         "feedback, messages, conversations, sessions, user_watchlist, "
         "users, notifications, watchlist, disclosures, chunks, financial_items, filings, "
         "companies, app_state CASCADE"
@@ -594,6 +594,18 @@ def _seed_user(repo, email: str, rcept_no: str) -> dict:
     repo.create_auth_token(uid, "reset", "r" * 63 + email[0], later)
     repo.create_auth_token(uid, "verify", "v" * 63 + email[0], later)
     assert repo.remember_device(uid, "h" * 63 + email[0]) == "first"
+    repo.add_push_subscription(
+        uid,
+        f"https://fcm.googleapis.com/fcm/send/push-secret-{email}",
+        "p256",
+        "auth",
+        "vapid",
+        "Chrome · Windows",
+    )
+    assert repo.start_totp(uid, f"sealed-totp-{email}")
+    assert repo.enable_totp(uid, 1, ["k" * 63 + email[0], "K" * 63 + email[0]])
+    repo.create_login_challenge("c" * 63 + email[0], uid, later)
+    repo.create_session(email[0] * 64, uid, later)  # 2단계 인증을 켜면 세션이 끊기므로 다시
     conv = repo.create_conversation(uid, f"{email} 질문")
     repo.add_message(conv, "user", "삼성전자 매출은?", {"context": {}})
     answer = repo.add_message(conv, "assistant", "답 [1]", {"sources": []})
@@ -628,6 +640,10 @@ def test_delete_user_leaves_no_rows(repo):
         "conversations",
         "auth_tokens",
         "user_devices",
+        "user_push_subscriptions",
+        "user_totp",
+        "user_recovery_codes",
+        "login_challenges",
     }
     # 사용자를 가리키는 외래 키는 모두 ON DELETE CASCADE (직접 지우기를 빠뜨려도 남지 않게)
     rules = repo.conn.execute(
@@ -642,9 +658,15 @@ def test_delete_user_leaves_no_rows(repo):
     assert {c["kind"]: c["target"] for c in exported["alert_channels"]} == {
         "email": "a@b.co",
         "telegram": "42",
+        "push": None,
     }
     assert exported["notifications"][0]["rcept_no"] == "20250311000001"
     assert len(exported["devices"]) == 1 and exported["account"]["email_verified_at"] is None
+    # 웹 푸시는 푸시 서비스 호스트만, 2단계 인증은 켰는지와 남은 복구 코드 수만
+    [push] = exported["push_subscriptions"]
+    assert push["push_service"] == "fcm.googleapis.com" and push["label"] == "Chrome · Windows"
+    assert exported["two_factor"]["enabled"] is True
+    assert exported["two_factor"]["recovery_codes_left"] == 2
     [conv] = exported["conversations"]
     assert [m["role"] for m in conv["messages"]] == ["user", "assistant"]
     assert conv["messages"][1]["feedback"]["comment"] == "숫자가 달라요"
@@ -652,6 +674,8 @@ def test_delete_user_leaves_no_rows(repo):
     flat = repr(exported)
     assert "secret-hash" not in flat and "pppp" not in flat and "c@d.co" not in flat
     assert "rrrr" not in flat and "vvvv" not in flat and "hhhh" not in flat
+    assert "push-secret" not in flat and "p256" not in flat and "sealed-totp" not in flat
+    assert "kkkk" not in flat and "cccc" not in flat
 
     assert repo.delete_user(a["uid"]) and not repo.delete_user(a["uid"])
     assert repo.export_user(a["uid"]) is None
@@ -742,7 +766,7 @@ def test_migration_marks_alert_verified_users(repo):
     assert repo.email_verified(uid) is True
 
 
-def _disclosure(no: str, corp: str = "00126380") -> dict:
+def _disclosure(no: str, corp: str = "00126380", importance: int = 3) -> dict:
     return {
         "rcept_no": no,
         "corp_code": corp,
@@ -756,9 +780,143 @@ def _disclosure(no: str, corp: str = "00126380") -> dict:
         "pblntf_ty": "B",
         "event_type": "x",
         "event_label": "유상증자",
-        "importance": 3,
+        "importance": importance,
         "correction": False,
     }
+
+
+def test_push_subscriptions_and_pending(repo):
+    import hashlib
+
+    repo.upsert_companies([Corp(corp_code="00126380", corp_name="삼성전자", stock_code="005930")])
+    uid = repo.create_user("a@b.co", "h")
+    other = repo.create_user("c@d.co", "h")
+    repo.set_watch("00126380", 2, uid)
+    a = "https://fcm.googleapis.com/fcm/send/a"
+    b = "https://updates.push.services.mozilla.com/wpush/v2/b"
+
+    first = repo.add_push_subscription(uid, a, "pa", "aa", "V1", "Chrome · Windows")
+    repo.add_push_subscription(uid, b, "pb", "ab", "V1", "Firefox · macOS")
+    assert [s["endpoint"] for s in repo.push_subscriptions(uid)] == [a, b]
+    [ch] = repo.alert_channels(uid)
+    assert ch["kind"] == "push" and ch["verified"] and ch["enabled"] and ch["target"] is None
+    devices = repo.push_devices(uid)
+    assert devices[0]["key"] == hashlib.sha256(a.encode()).hexdigest()
+    assert devices[0]["label"] == "Chrome · Windows" and devices[0]["last_sent_at"] is None
+
+    repo.insert_disclosures([_disclosure("20250311000001")])
+    pending = repo.user_pending_alerts()
+    assert [(p["user_id"], p["kind"], p["target"]) for p in pending] == [(uid, "push", None)]
+
+    # 보낸 곳은 시각을 적고, 끝난 구독은 지운다
+    repo.record_push_results(uid, [first], [])
+    assert repo.push_devices(uid)[0]["last_sent_at"] is not None
+    second = repo.push_subscriptions(uid)[1]["id"]
+    repo.record_push_results(uid, [], [second])
+    assert [s["endpoint"] for s in repo.push_subscriptions(uid)] == [a]
+
+    # 같은 브라우저를 다른 사용자가 구독하면 옮겨 가고, 구독이 없는 채널은 사라진다
+    repo.add_push_subscription(other, a, "pa2", "aa2", "V1", "Chrome · Windows")
+    assert repo.push_subscriptions(uid) == [] and repo.alert_channels(uid) == []
+    assert repo.user_pending_alerts() == []  # 구독이 없으면 보낼 것도 없다
+    assert repo.push_subscriptions(other)[0]["p256dh"] == "pa2"
+
+    # 사용자마다 최대 개수를 넘으면 오래된 것부터 지운다
+    for i in range(4):
+        repo.add_push_subscription(uid, f"{a}-{i}", "p", "a", "V1", "x", max_per_user=3)
+    assert [s["endpoint"][-1] for s in repo.push_subscriptions(uid)] == ["1", "2", "3"]
+
+    # 하나씩 해제 (다른 사용자 것은 지울 수 없다), 채널째 지우기
+    assert not repo.remove_push_subscription(other, endpoint=f"{a}-1")
+    assert repo.remove_push_subscription(uid, endpoint=f"{a}-1")
+    sid = repo.push_subscriptions(uid)[0]["id"]
+    assert repo.remove_push_subscription(uid, sub_id=sid)
+    assert repo.set_alert_enabled(uid, "push", False)
+    assert repo.remove_alert_channel(uid, "push") and repo.push_subscriptions(uid) == []
+    assert len(repo.push_subscriptions(other)) == 1
+
+
+def test_two_factor_storage(repo):
+    from datetime import UTC, datetime, timedelta
+
+    uid = repo.create_user("a@b.co", "h")
+    later = datetime.now(UTC) + timedelta(minutes=5)
+    assert repo.totp(uid) is None and not repo.totp_enabled(uid)
+    assert repo.start_totp(uid, "v1:first") and repo.start_totp(uid, "v1:second")
+    state = repo.totp(uid)
+    assert state == {"secret": "v1:second", "enabled": False, "last_step": None, "recovery_left": 0}
+    assert not repo.use_totp_step(uid, 5)  # 켜기 전에는 로그인에 쓰지 않는다
+
+    repo.create_session("s" * 64, uid, later)
+    assert repo.enable_totp(uid, 10, ["1" * 64, "2" * 64])
+    assert not repo.enable_totp(uid, 11, ["3" * 64])
+    assert repo.session_user("s" * 64) is None  # 켜면 다른 로그인은 끊는다
+    assert repo.totp_enabled(uid) and repo.totp(uid)["recovery_left"] == 2
+    assert not repo.start_totp(uid, "v1:third")  # 켠 상태에서는 비밀값을 바꾸지 않는다
+    assert repo.totp(uid)["secret"] == "v1:second"
+
+    # 같은 구간이나 앞 구간 코드는 다시 쓸 수 없다
+    assert not repo.use_totp_step(uid, 10) and not repo.use_totp_step(uid, 9)
+    assert repo.use_totp_step(uid, 11) and not repo.use_totp_step(uid, 11)
+    assert repo.use_recovery_code(uid, "1" * 64) == 1
+    assert repo.use_recovery_code(uid, "1" * 64) is None
+    repo.replace_recovery_codes(uid, ["4" * 64, "5" * 64, "6" * 64])
+    assert repo.use_recovery_code(uid, "2" * 64) is None and repo.totp(uid)["recovery_left"] == 3
+
+    # 로그인 중간 단계: 기한, 틀린 횟수
+    repo.create_login_challenge("c" * 64, uid, later)
+    assert repo.login_challenge("c" * 64, 3) == (uid, "a@b.co")
+    assert repo.fail_login_challenge("c" * 64, 3) == 2
+    assert repo.fail_login_challenge("c" * 64, 3) == 1
+    assert repo.fail_login_challenge("c" * 64, 3) == 0
+    assert repo.login_challenge("c" * 64, 3) is None
+    repo.create_login_challenge("d" * 64, uid, datetime.now(UTC) - timedelta(seconds=1))
+    assert repo.login_challenge("d" * 64, 3) is None
+    repo.create_login_challenge("e" * 64, uid, later)  # 만료된 단계는 이때 지운다
+    assert _count(repo, "login_challenges") == 1
+    repo.delete_login_challenge("e" * 64)
+    assert _count(repo, "login_challenges") == 0
+
+    repo.create_login_challenge("f" * 64, uid, later)
+    repo.create_session("t" * 64, uid, later)
+    assert repo.revoke_sessions(uid) == 1 and repo.session_user("t" * 64) is None
+    assert repo.disable_totp(uid) and not repo.disable_totp(uid)
+    assert repo.totp(uid) is None
+    assert _count(repo, "user_recovery_codes") == 0 and _count(repo, "login_challenges") == 0
+    assert repo.export_user(uid)["two_factor"] == {"enabled": False}
+
+
+def test_migrations_013_014(repo):
+    """push 채널 종류, 새 표의 외래 키, 다시 돌려도 되는지."""
+    uid = repo.create_user("a@b.co", "h")
+    repo.migrate()
+    repo.migrate()
+    defs = repo.conn.execute(
+        """SELECT pg_get_constraintdef(oid) FROM pg_constraint
+           WHERE conname = 'user_alert_channels_kind_check'"""
+    ).fetchall()
+    assert len(defs) == 1 and "push" in defs[0][0]
+    repo.conn.execute(
+        "INSERT INTO user_alert_channels (user_id, kind, verified_at) VALUES (%s, 'push', now())",
+        (uid,),
+    )
+    repo.conn.commit()
+    with pytest.raises(psycopg.errors.CheckViolation):
+        repo.conn.execute(
+            "INSERT INTO user_alert_channels (user_id, kind) VALUES (%s, 'sms')", (uid,)
+        )
+    repo.conn.rollback()
+    with pytest.raises(psycopg.errors.UniqueViolation):
+        for _ in range(2):
+            repo.conn.execute(
+                """INSERT INTO user_push_subscriptions (user_id, endpoint, p256dh, auth, vapid_key)
+                   VALUES (%s, 'https://fcm.googleapis.com/x', 'p', 'a', 'v')""",
+                (uid,),
+            )
+    repo.conn.rollback()
+    tables = {t for t, _ in _user_references(repo)}
+    new = {"user_push_subscriptions", "user_totp", "user_recovery_codes", "login_challenges"}
+    assert new <= tables
 
 
 def test_company_versions_follow_dashboard_data(repo):

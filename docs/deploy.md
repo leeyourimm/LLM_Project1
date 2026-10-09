@@ -158,6 +158,35 @@ docker compose exec -d worker dartrag run --eval-limit 0
 docker compose exec api dartrag telegram webhook
 ```
 
+### 웹 푸시 알림 (선택, 무료)
+
+공시 알림을 브라우저 알림으로도 받게 하려면 서버 키(VAPID)를 한 번 만듭니다. 브라우저 회사의 푸시 서비스(Chrome·Edge·삼성 인터넷은 Google, Firefox는 Mozilla, Safari는 Apple)를 거쳐 가며 가입이나 비용이 들지 않습니다. 아래 첫 명령이 키를 만들어 `.env` 끝에 붙이고, 비밀키는 화면에 보이지 않습니다. 이어서 다시 띄우고 점검합니다.
+
+```bash
+docker compose run --rm --no-deps -T api dartrag push keys --print >> .env
+docker compose up -d
+docker compose exec api dartrag doctor
+```
+
+`doctor`에 웹 푸시 경고가 없으면 사용자는 관심 종목 화면의 "알림 받을 곳"에서 "이 브라우저에서 받기"를 누르면 됩니다.
+
+- 키가 이미 있으면 명령이 아무것도 붙이지 않고 멈춥니다. 키를 바꾸면 모든 사용자의 구독이 끊겨 다시 받아야 하므로, 비밀키가 새었을 때만 `.env`에서 `VAPID_PUBLIC_KEY`, `VAPID_PRIVATE_KEY` 두 줄을 지우고 위 명령을 다시 실행합니다.
+- `VAPID_SUBJECT`는 푸시 서비스가 문제가 있을 때 연락할 주소입니다. 비우면 `PUBLIC_URL`을 쓰고, 메일로 받으려면 `mailto:admin@example.com`처럼 넣습니다.
+- 웹 푸시는 https 주소에서만 됩니다. 아이폰·아이패드(iOS 16.4 이상)는 Safari 공유 메뉴의 "홈 화면에 추가"로 연 화면에서만 받을 수 있습니다.
+- 개발용으로 내 컴퓨터에서 쓸 때는 저장소 폴더에서 `dartrag push keys`를 실행하면 `.env`에 바로 넣습니다 (`http://localhost`도 됩니다).
+
+### 2단계 인증
+
+설정할 것은 없습니다. 사용자가 계정 화면에서 인증 앱(Google Authenticator 등)을 등록해 켭니다. 알아 둘 점:
+
+- 메일로 비밀번호를 재설정해도 2단계 인증은 꺼지지 않습니다. 재설정한 기기에서도 인증 앱 코드나 복구 코드를 넣어야 로그인됩니다.
+- 인증 앱 키는 `SECRET_KEY`로 암호화해 둡니다. `SECRET_KEY`를 바꾸면 2단계 인증을 켠 사용자는 인증 앱 코드로 로그인할 수 없고, 복구 코드로 들어와 끄고 다시 켜야 합니다.
+- 휴대폰과 복구 코드를 모두 잃은 사용자는 본인인지 확인한 뒤 아래로 2단계 인증을 끕니다. 그 계정의 로그인도 모두 끊깁니다.
+
+```bash
+docker compose exec api dartrag user 2fa-off me@example.com
+```
+
 ## 5. 상태 확인
 
 서버 안에서 한 번에 보기:

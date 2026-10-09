@@ -41,6 +41,11 @@ class FakeRepo:
         self.verified = set()
         self.tokens = {}
         self.devices = {}
+        self.totp_rows = {}  # 2단계 인증: uid → {secret, enabled, last_step}
+        self.recovery = {}  # uid → 복구 코드 해시들
+        self.challenges = {}  # 로그인 중간 단계: 해시 → [uid, 틀린 횟수, 만료]
+        self.push = {}  # 웹 푸시 구독: id → {...}
+        self.push_seq = 0
         # 답변 신뢰도: 회사의 최신 정기공시 (None 이면 인용한 공시가 최신)
         self.latest_filing = None
         # 대시보드 캐시 무효화용 회사 데이터 버전
@@ -146,7 +151,156 @@ class FakeRepo:
         self.tokens = {h: t for h, t in self.tokens.items() if t[0] != uid}
         self.devices.pop(uid, None)
         self.verified.discard(uid)
+        self.totp_rows.pop(uid, None)
+        self.recovery.pop(uid, None)
+        self.challenges = {h: c for h, c in self.challenges.items() if c[0] != uid}
+        self.push = {i: s for i, s in self.push.items() if s["user_id"] != uid}
         return True
+
+    def revoke_sessions(self, uid):
+        before = len(self.sessions)
+        self.sessions = {t: u for t, u in self.sessions.items() if u != uid}
+        return before - len(self.sessions)
+
+    # 2단계 인증
+    def totp(self, uid):
+        row = self.totp_rows.get(uid)
+        if row is None:
+            return None
+        return {**row, "recovery_left": len(self.recovery.get(uid, ()))}
+
+    def totp_enabled(self, uid):
+        return bool(self.totp_rows.get(uid, {}).get("enabled"))
+
+    def start_totp(self, uid, sealed):
+        if self.totp_enabled(uid):
+            return False
+        self.totp_rows[uid] = {"secret": sealed, "enabled": False, "last_step": None}
+        return True
+
+    def enable_totp(self, uid, step, hashes):
+        row = self.totp_rows.get(uid)
+        if not row or row["enabled"]:
+            return False
+        row.update(enabled=True, last_step=step)
+        self.recovery[uid] = set(hashes)
+        self.revoke_sessions(uid)
+        return True
+
+    def replace_recovery_codes(self, uid, hashes):
+        self.recovery[uid] = set(hashes)
+
+    def use_totp_step(self, uid, step):
+        row = self.totp_rows.get(uid)
+        if not row or not row["enabled"]:
+            return False
+        if row["last_step"] is not None and row["last_step"] >= step:
+            return False
+        row["last_step"] = step
+        return True
+
+    def use_recovery_code(self, uid, code_hash):
+        codes = self.recovery.get(uid, set())
+        if code_hash not in codes:
+            return None
+        codes.discard(code_hash)
+        return len(codes)
+
+    def disable_totp(self, uid):
+        self.recovery.pop(uid, None)
+        self.challenges = {h: c for h, c in self.challenges.items() if c[0] != uid}
+        return self.totp_rows.pop(uid, None) is not None
+
+    def create_login_challenge(self, token_hash, uid, expires):
+        assert len(token_hash) == 64 and expires > datetime.now(UTC)
+        self.challenges[token_hash] = [uid, 0, expires]
+
+    def login_challenge(self, token_hash, max_attempts):
+        c = self.challenges.get(token_hash)
+        if not c or c[2] <= datetime.now(UTC) or c[1] >= max_attempts:
+            return None
+        return c[0], self.users[c[0]][0]
+
+    def fail_login_challenge(self, token_hash, max_attempts):
+        c = self.challenges.get(token_hash)
+        if not c:
+            return 0
+        c[1] += 1
+        left = max_attempts - c[1]
+        if left <= 0:
+            del self.challenges[token_hash]
+        return max(left, 0)
+
+    def delete_login_challenge(self, token_hash):
+        self.challenges.pop(token_hash, None)
+
+    # 웹 푸시
+    def add_push_subscription(self, uid, endpoint, p256dh, auth, vapid_key, label, max_per_user=10):
+        old = [s["user_id"] for s in self.push.values() if s["endpoint"] == endpoint]
+        self.push = {i: s for i, s in self.push.items() if s["endpoint"] != endpoint}
+        self.push_seq += 1
+        self.push[self.push_seq] = {
+            "id": self.push_seq,
+            "user_id": uid,
+            "endpoint": endpoint,
+            "p256dh": p256dh,
+            "auth": auth,
+            "vapid_key": vapid_key,
+            "label": label,
+            "last_sent_at": None,
+        }
+        mine = sorted(i for i, s in self.push.items() if s["user_id"] == uid)
+        for i in mine[:-max_per_user]:
+            del self.push[i]
+        ch = self.channels.setdefault(
+            (uid, "push"), {"target": None, "hash": None, "verified": True, "enabled": True}
+        )
+        ch["enabled"] = True
+        for other in old:
+            self._drop_empty_push(other)
+        return self.push_seq
+
+    def _drop_empty_push(self, uid):
+        if not any(s["user_id"] == uid for s in self.push.values()):
+            self.channels.pop((uid, "push"), None)
+
+    def push_subscriptions(self, uid):
+        keys = ("id", "endpoint", "p256dh", "auth", "vapid_key")
+        return [{k: s[k] for k in keys} for s in self.push.values() if s["user_id"] == uid]
+
+    def push_devices(self, uid):
+        import hashlib
+
+        return [
+            {
+                "id": s["id"],
+                "label": s["label"],
+                "key": hashlib.sha256(s["endpoint"].encode()).hexdigest(),
+                "created_at": datetime(2026, 10, 1, tzinfo=UTC),
+                "last_sent_at": s["last_sent_at"],
+            }
+            for s in self.push.values()
+            if s["user_id"] == uid
+        ]
+
+    def remove_push_subscription(self, uid, *, endpoint=None, sub_id=None):
+        hit = [
+            i
+            for i, s in self.push.items()
+            if s["user_id"] == uid and (s["endpoint"] == endpoint or i == sub_id)
+        ]
+        for i in hit:
+            del self.push[i]
+        self._drop_empty_push(uid)
+        return bool(hit)
+
+    def record_push_results(self, uid, sent, gone):
+        for i in sent:
+            self.push[i]["last_sent_at"] = datetime.now(UTC)
+        for i in gone:
+            self.push.pop(i, None)
+        if gone:
+            self._drop_empty_push(uid)
 
     def export_user(self, uid):
         if uid not in self.users:
@@ -306,6 +460,8 @@ class FakeRepo:
         return True
 
     def remove_alert_channel(self, uid, kind):
+        if kind == "push":
+            self.push = {i: s for i, s in self.push.items() if s["user_id"] != uid}
         return self.channels.pop((uid, kind), None) is not None
 
     def disable_telegram_chat(self, chat_id):
@@ -889,7 +1045,7 @@ def alerting():
 def test_email_alert_verification(alerting):
     client, repo, senders = alerting
     r = client.get("/api/alerts").json()
-    assert r["per_user"] and r["available"] == {"email": True, "telegram": True}
+    assert r["per_user"] and r["available"] == {"email": True, "telegram": True, "push": False}
     assert client.post("/api/alerts/email").json() == {"ok": True, "sent_to": "a@b.co"}
     assert client.post("/api/alerts/email").status_code == 429  # 연달아 보내지 않는다
     # 첫 메일은 가입 이메일 인증, 두 번째가 알림 인증
@@ -955,7 +1111,11 @@ def test_unsubscribe_link(alerting):
 def test_alerts_need_login_mode(ctx):
     client, *_ = ctx
     r = client.get("/api/alerts").json()
-    assert r["per_user"] is False and r["available"] == {"email": False, "telegram": False}
+    assert r["per_user"] is False and r["available"] == {
+        "email": False,
+        "telegram": False,
+        "push": False,
+    }
     assert client.post("/api/alerts/email").status_code == 400
 
 

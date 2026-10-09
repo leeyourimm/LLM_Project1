@@ -197,19 +197,52 @@ export interface WatchItem {
 }
 
 export interface AlertChannel {
-  kind: "email" | "telegram";
+  kind: "email" | "telegram" | "push";
   target: string | null;
   verified: boolean;
   enabled: boolean;
   pending: boolean | null;
 }
 
+// 웹 푸시를 구독한 브라우저. 구독 주소 대신 주소의 SHA-256(key)만 온다
+export interface PushDevice {
+  id: number;
+  label: string;
+  key: string;
+  created_at: string;
+  last_sent_at: string | null;
+}
+
 export interface AlertSettings {
   per_user: boolean;
-  available: { email: boolean; telegram: boolean };
+  available: { email: boolean; telegram: boolean; push?: boolean };
   channels: AlertChannel[];
   // 가입 이메일 인증 전이라 이메일 알림을 켤 수 없음
   email_needs_verification?: boolean;
+  // 웹 푸시 서버 공개키(VAPID, applicationServerKey)와 구독한 브라우저 목록
+  push_public_key?: string | null;
+  push_devices?: PushDevice[];
+}
+
+export interface TwoFactorStatus {
+  enabled: boolean;
+  recovery_codes_left: number;
+}
+
+export interface TwoFactorSetup {
+  secret: string; // 4글자씩 띄운 직접 입력용 키
+  otpauth_uri: string;
+  qr: string; // data:image/svg+xml
+  issuer: string;
+  account: string;
+}
+
+// 로그인·비밀번호 재설정 응답: 2단계 인증을 켠 계정이면 user 대신 two_factor
+export interface LoginResult {
+  user?: { email: string; email_verified?: boolean };
+  two_factor?: boolean;
+  method?: "totp" | "recovery";
+  recovery_codes_left?: number;
 }
 
 export const METRIC_LABEL: Record<string, string> = {

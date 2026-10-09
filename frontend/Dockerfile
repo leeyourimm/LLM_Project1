@@ -29,6 +29,8 @@ ENV NODE_ENV=production \
 
 COPY --from=build --chown=node:node /app/.next/standalone ./
 COPY --from=build --chown=node:node /app/.next/static ./.next/static
+# 웹 푸시 서비스 워커(sw.js) 같은 정적 파일
+COPY --from=build --chown=node:node /app/public ./public
 
 # node 이미지에 들어 있는 일반 사용자
 USER node

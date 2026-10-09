@@ -32,7 +32,7 @@ from pydantic import BaseModel, Field
 from dartrag.obs import metrics
 from dartrag.obs.metrics import StateCollector
 from dartrag.search import SearchFilter
-from dartrag.web import account_mail, auth
+from dartrag.web import account_mail, auth, two_factor
 from dartrag.web.alerts import build_routers as build_alert_routers
 from dartrag.web.chat import DISCLAIMER, build_router
 from dartrag.web.chat import source_dict as _source
@@ -63,6 +63,8 @@ class PasswordChange(BaseModel):
 
 class AccountDelete(BaseModel):
     password: str = Field(max_length=auth.PASSWORD_MAX)
+    # 2단계 인증을 켰으면 인증 앱 코드나 복구 코드도 확인한다
+    code: str = Field("", max_length=two_factor.CODE_MAX)
 
 
 class ForgotRequest(BaseModel):
@@ -75,6 +77,10 @@ class TokenRequest(BaseModel):
 
 class PasswordReset(TokenRequest):
     password: str = Field(max_length=auth.PASSWORD_MAX)
+
+
+class SecondFactor(BaseModel):
+    code: str = Field(min_length=1, max_length=two_factor.CODE_MAX)
 
 
 @dataclass(frozen=True)
@@ -204,6 +210,38 @@ def create_app(services: Services, limiter: auth.LoginLimiter | None = None) -> 
         if not services.auth_required:
             raise HTTPException(400, "로그인을 쓰지 않는 설정입니다 (AUTH_REQUIRED=false)")
 
+    # --- 2단계 인증: 비밀번호는 맞고 코드를 기다리는 로그인 ---------------------
+    # 토큰은 HttpOnly 쿠키(5분, /api/auth 에만 보냄)에, DB 에는 해시만 둔다.
+    # 화면 스크립트는 읽을 수 없다
+
+    def start_challenge(response: Response, user_id: int) -> None:
+        token, hashed = auth.new_session_token()
+        until = datetime.now(UTC) + timedelta(minutes=two_factor.CHALLENGE_MINUTES)
+        with services.repo() as repo:
+            repo.create_login_challenge(hashed, user_id, until)
+        response.set_cookie(
+            two_factor.CHALLENGE_COOKIE,
+            token,
+            max_age=two_factor.CHALLENGE_MINUTES * 60,
+            httponly=True,
+            samesite="strict",
+            secure=services.cookie_secure,
+            path="/api/auth",
+        )
+
+    def challenge_failed(status: int, detail: str, *, restart: bool) -> JSONResponse:
+        # HTTPException 으로는 쿠키를 지울 수 없어 응답을 직접 만든다
+        res = JSONResponse({"detail": detail, "restart": restart}, status)
+        if restart:
+            res.delete_cookie(
+                two_factor.CHALLENGE_COOKIE,
+                path="/api/auth",
+                httponly=True,
+                samesite="strict",
+                secure=services.cookie_secure,
+            )
+        return res
+
     # --- 계정 메일 (비밀번호 재설정, 이메일 인증, 새 기기 알림) -------------------
 
     def email_sender():
@@ -314,10 +352,62 @@ def create_app(services: Services, limiter: auth.LoginLimiter | None = None) -> 
         if not (row and ok):
             limiter.failed(ip, email)
             raise HTTPException(401, "이메일 또는 비밀번호가 맞지 않습니다")
+        with services.repo() as repo:
+            needs_code = repo.totp_enabled(row[0])
+        if needs_code:
+            # 아직 로그인하지 않았다. 틀린 횟수도 코드까지 맞힌 뒤에 지운다
+            start_challenge(response, row[0])
+            return {"two_factor": True}
         limiter.succeeded(ip, email)
         start_session(response, row[0])
         note_login(request, background, row[0], row[1])
         return {"user": {"email": row[1]}}
+
+    @app.post("/api/auth/login/2fa", dependencies=[rate("auth")])
+    def login_second_factor(
+        req: SecondFactor, request: Request, response: Response, background: BackgroundTasks
+    ):
+        """로그인 두 번째 단계: 인증 앱 코드나 복구 코드.
+
+        틀리면 그 로그인 단계에서 5번까지, 계정 기준 로그인 시도 제한(LoginLimiter)에도
+        함께 센다."""
+        need_auth_mode()
+        expired = "로그인 단계가 만료됐습니다. 이메일과 비밀번호부터 다시 입력해 주세요"
+        token = request.cookies.get(two_factor.CHALLENGE_COOKIE)
+        if not token:
+            return challenge_failed(401, expired, restart=True)
+        hashed = auth.token_hash(token)
+        ip = client_ip(request)
+        with services.repo() as repo:
+            found = repo.login_challenge(hashed, two_factor.CHALLENGE_ATTEMPTS)
+            if found is None:
+                return challenge_failed(401, expired, restart=True)
+            user_id, email = found
+            if limiter.blocked(ip, email):
+                raise HTTPException(429, "로그인 시도가 너무 많습니다. 15분 뒤에 다시 해주세요")
+            result = two_factor.check_second_factor(services, repo, user_id, req.code)
+            if result is None:
+                limiter.failed(ip, email)
+                left = repo.fail_login_challenge(hashed, two_factor.CHALLENGE_ATTEMPTS)
+                if left == 0:
+                    return challenge_failed(
+                        401,
+                        "인증 코드를 여러 번 틀렸습니다. 처음부터 다시 로그인해 주세요",
+                        restart=True,
+                    )
+                return challenge_failed(401, two_factor.WRONG_CODE, restart=False)
+            repo.delete_login_challenge(hashed)
+        limiter.succeeded(ip, email)
+        response.delete_cookie(
+            two_factor.CHALLENGE_COOKIE,
+            path="/api/auth",
+            httponly=True,
+            samesite="strict",
+            secure=services.cookie_secure,
+        )
+        start_session(response, user_id)
+        note_login(request, background, user_id, email)
+        return {"user": {"email": email}} | result
 
     @app.post("/api/auth/password/forgot", status_code=202, dependencies=[rate("auth")])
     def forgot_password(req: ForgotRequest, background: BackgroundTasks):
@@ -348,7 +438,10 @@ def create_app(services: Services, limiter: auth.LoginLimiter | None = None) -> 
     def reset_password(
         req: PasswordReset, request: Request, response: Response, background: BackgroundTasks
     ):
-        """메일 링크의 토큰으로 새 비밀번호를 정한다. 다른 기기의 로그인은 모두 끊는다."""
+        """메일 링크의 토큰으로 새 비밀번호를 정한다. 다른 기기의 로그인은 모두 끊는다.
+
+        2단계 인증은 그대로 둔다: 메일함만 빼앗은 사람이 재설정으로 2단계 인증을 건너뛰지 못하게,
+        켠 사용자는 이 기기에서도 인증 앱 코드(또는 복구 코드)를 넣어야 로그인된다."""
         need_auth_mode()
         try:
             # 토큰을 쓰기 전에 검사해야 정책에 걸려도 같은 링크로 다시 할 수 있다
@@ -361,6 +454,10 @@ def create_app(services: Services, limiter: auth.LoginLimiter | None = None) -> 
                 raise HTTPException(400, EXPIRED_RESET)
             user_id, email = found
             repo.reset_password(user_id, auth.hash_password(req.password))
+            needs_code = repo.totp_enabled(user_id)
+        if needs_code:
+            start_challenge(response, user_id)
+            return {"two_factor": True}
         limiter.succeeded(client_ip(request), email)
         start_session(response, user_id)
         # 메일을 받아 직접 바꾼 기기라 알리지 않고 기록만 한다
@@ -422,7 +519,8 @@ def create_app(services: Services, limiter: auth.LoginLimiter | None = None) -> 
     def delete_account(
         req: AccountDelete, user: CurrentUser, response: Response, background: BackgroundTasks
     ):
-        """탈퇴: 지금 비밀번호를 확인하고 계정과 관심 종목, 알림 설정, 대화 기록을 모두 지운다.
+        """탈퇴: 지금 비밀번호를 확인하고 계정과 관심 종목, 알림 설정(웹 푸시 구독 포함),
+        2단계 인증, 대화 기록을 모두 지운다. 2단계 인증을 켰으면 코드도 확인한다.
 
         LLM 추적(Langfuse)에 남은 그 사용자 가명의 기록도 응답을 보낸 뒤 지우도록 요청한다.
         """
@@ -431,6 +529,10 @@ def create_app(services: Services, limiter: auth.LoginLimiter | None = None) -> 
             row = repo.user_by_email(user.email)
             if row is None or not auth.verify_password(req.password, row[2]):
                 raise HTTPException(401, "비밀번호가 맞지 않습니다")
+            if repo.totp_enabled(user.id) and (
+                two_factor.check_second_factor(services, repo, user.id, req.code) is None
+            ):
+                raise HTTPException(401, two_factor.WRONG_CODE)
             repo.delete_user(user.id)
         if services.tracer is not None:
             background.add_task(forget_traces, user.id)
@@ -445,7 +547,8 @@ def create_app(services: Services, limiter: auth.LoginLimiter | None = None) -> 
 
     @api.get("/api/account/export", dependencies=[rate("heavy")])
     def export_account(user: CurrentUser):
-        """내 데이터 내려받기 (JSON). 비밀번호 해시와 인증 코드는 넣지 않는다."""
+        """내 데이터 내려받기 (JSON). 비밀번호 해시, 인증 코드, 2단계 인증 비밀값·복구 코드,
+        웹 푸시 구독 주소·키는 넣지 않는다."""
         need_auth_mode()
         with services.repo() as repo:
             data = repo.export_user(user.id)
@@ -604,6 +707,7 @@ def create_app(services: Services, limiter: auth.LoginLimiter | None = None) -> 
 
     api.include_router(build_router(services, CurrentUser, corp_codes, rate))
     api.include_router(build_insights_router(services, rate))
+    api.include_router(two_factor.build_router(services, CurrentUser, rate, start_session))
     alerts_api, alerts_public = build_alert_routers(services, CurrentUser)
     api.include_router(alerts_api)
     app.include_router(alerts_public)

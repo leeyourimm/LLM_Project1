@@ -137,8 +137,9 @@ def build_llm(settings: Settings, *, fallback: bool = True):
 
 
 def build_senders(settings: Settings) -> dict:
-    """설정된 발송 수단만: {"email": EmailSender, "telegram": TelegramSender}."""
-    from dartrag.feed.channels import EmailSender, TelegramSender
+    """설정된 발송 수단만: {"email": EmailSender, "telegram": TelegramSender,
+    "push": WebPushSender}."""
+    from dartrag.feed.channels import EmailSender, TelegramSender, WebPushSender
 
     senders: dict = {}
     if settings.smtp_host and settings.smtp_from:
@@ -152,6 +153,15 @@ def build_senders(settings: Settings) -> dict:
         )
     if settings.telegram_bot_token:
         senders["telegram"] = TelegramSender(settings.telegram_bot_token)
+    if settings.vapid_private_key and settings.vapid_public_key:
+        try:
+            senders["push"] = WebPushSender(
+                settings.vapid_private_key,
+                settings.vapid_public_key,
+                settings.vapid_subject or settings.public_url,
+            )
+        except ValueError as e:  # 오류 문구에는 키 값을 넣지 않는다
+            log.warning("웹 푸시를 켜지 못했습니다: %s", e)
     return senders
 
 

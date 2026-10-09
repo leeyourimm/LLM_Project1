@@ -4,9 +4,11 @@ import Link from "next/link";
 import { useRouter, useSearchParams } from "next/navigation";
 import { useEffect, useState } from "react";
 import { useApp } from "@/components/providers";
+import { TwoFactorStep, recoveryNotice } from "@/components/TwoFactorStep";
 import { ErrorBox } from "@/components/ui";
 import { post } from "@/lib/api";
 import { hideTokenFromAddressBar, linkToken } from "@/lib/token";
+import type { LoginResult } from "@/lib/types";
 
 export function ResetForm() {
   const { refreshAuth } = useApp();
@@ -18,10 +20,42 @@ export function ResetForm() {
   const [confirm, setConfirm] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<unknown>(null);
+  // 2단계 인증을 켠 계정은 비밀번호를 바꾼 뒤에도 코드를 넣어야 로그인된다
+  const [codeStep, setCodeStep] = useState(false);
+  const [notice, setNotice] = useState<string | null>(null);
 
   useEffect(() => {
     hideTokenFromAddressBar("/reset-password");
   }, []);
+
+  if (notice) {
+    return (
+      <section className="card mx-auto max-w-sm space-y-4">
+        <h1 className="text-xl font-bold">비밀번호를 바꿨습니다</h1>
+        <p role="status" className="text-sm">
+          {notice}
+        </p>
+        <button type="button" className="btn btn-primary w-full" onClick={() => router.replace("/")}>
+          계속
+        </button>
+      </section>
+    );
+  }
+
+  if (codeStep) {
+    return (
+      <TwoFactorStep
+        intro={<p className="text-sm">새 비밀번호로 바꿨습니다. 2단계 인증을 켠 계정이라 코드를 넣어야 로그인됩니다.</p>}
+        onDone={async (r) => {
+          await refreshAuth();
+          const n = recoveryNotice(r);
+          if (n) setNotice(n);
+          else router.replace("/");
+        }}
+        onRestart={() => router.replace("/login")}
+      />
+    );
+  }
 
   if (!token) {
     return (
@@ -46,7 +80,11 @@ export function ResetForm() {
         setBusy(true);
         setError(null);
         try {
-          await post("/api/auth/password/reset", { token, password });
+          const r = await post<LoginResult>("/api/auth/password/reset", { token, password });
+          if (r?.two_factor) {
+            setCodeStep(true);
+            return;
+          }
           await refreshAuth();
           router.replace("/");
         } catch (err) {
@@ -56,7 +94,9 @@ export function ResetForm() {
       }}
     >
       <h1 className="text-xl font-bold">새 비밀번호 정하기</h1>
-      <p className="text-sm text-muted">바꾸면 다른 모든 기기에서 로그아웃되고, 이 기기에서는 바로 로그인됩니다.</p>
+      <p className="text-sm text-muted">
+        바꾸면 다른 모든 기기에서 로그아웃되고, 이 기기에서는 바로 로그인됩니다. 2단계 인증을 켰다면 인증 코드도 넣어야 합니다.
+      </p>
       <div>
         <label htmlFor="new-password" className="label">
           새 비밀번호 (10자 이상)

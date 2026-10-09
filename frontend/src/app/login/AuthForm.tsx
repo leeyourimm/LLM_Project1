@@ -4,9 +4,11 @@ import Link from "next/link";
 import { useRouter, useSearchParams } from "next/navigation";
 import { useState } from "react";
 import { useApp } from "@/components/providers";
+import { TwoFactorStep, recoveryNotice } from "@/components/TwoFactorStep";
 import { ErrorBox } from "@/components/ui";
 import { post } from "@/lib/api";
 import { safeNext } from "@/lib/redirect";
+import type { LoginResult } from "@/lib/types";
 
 export function AuthForm({ mode }: { mode: "login" | "signup" }) {
   const { auth, refreshAuth } = useApp();
@@ -19,10 +21,45 @@ export function AuthForm({ mode }: { mode: "login" | "signup" }) {
   const [agree, setAgree] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<unknown>(null);
+  // 2단계 인증을 켠 계정: 비밀번호를 맞히면 코드 단계로 넘어간다
+  const [codeStep, setCodeStep] = useState(false);
+  const [notice, setNotice] = useState<string | null>(null);
   const signup = mode === "signup";
 
   if (auth && !auth.auth_required) {
     return <p className="card text-sm">로그인 없이 쓰는 설정입니다. <Link className="link" href="/">처음 화면으로</Link></p>;
+  }
+
+  if (notice) {
+    return (
+      <section className="card mx-auto max-w-sm space-y-4">
+        <h1 className="text-xl font-bold">로그인했습니다</h1>
+        <p role="status" className="text-sm">
+          {notice}
+        </p>
+        <button type="button" className="btn btn-primary w-full" onClick={() => router.replace(target)}>
+          계속
+        </button>
+      </section>
+    );
+  }
+
+  if (codeStep) {
+    return (
+      <TwoFactorStep
+        onDone={async (r) => {
+          await refreshAuth();
+          const n = recoveryNotice(r);
+          if (n) setNotice(n);
+          else router.replace(target);
+        }}
+        onRestart={() => {
+          setCodeStep(false);
+          setPassword("");
+          setError(null);
+        }}
+      />
+    );
   }
 
   return (
@@ -33,7 +70,11 @@ export function AuthForm({ mode }: { mode: "login" | "signup" }) {
         setBusy(true);
         setError(null);
         try {
-          await post(signup ? "/api/auth/signup" : "/api/auth/login", { email, password });
+          const r = await post<LoginResult>(signup ? "/api/auth/signup" : "/api/auth/login", { email, password });
+          if (r?.two_factor) {
+            setCodeStep(true);
+            return;
+          }
           await refreshAuth();
           router.replace(target);
         } catch (err) {

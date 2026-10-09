@@ -530,6 +530,91 @@ def alert_test():
         raise typer.Exit(1)
 
 
+push_app = typer.Typer(help="웹 푸시 알림")
+app.add_typer(push_app, name="push")
+
+VAPID_NOTE = (
+    "# 웹 푸시 VAPID 키 (dartrag push keys 로 만듦). 바꾸면 모든 사용자가 다시 구독해야 한다"
+)
+
+
+def _env_value(lines: list[str], key: str) -> str | None:
+    for line in lines:
+        name, sep, value = line.partition("=")
+        if sep and name.strip() == key:
+            return value.strip().strip("'\"")
+    return None
+
+
+def _set_env_values(path: Path, values: dict[str, str]) -> None:
+    """.env 의 KEY= 줄을 바꾸거나 끝에 더한다. 새 파일은 본인만 읽을 수 있게(600) 만든다."""
+    import os
+
+    lines = path.read_text("utf-8").splitlines() if path.exists() else []
+    left = dict(values)
+    for i, line in enumerate(lines):
+        name = line.partition("=")[0].strip()
+        if "=" in line and name in left:
+            lines[i] = f"{name}={left.pop(name)}"
+    if left:
+        if lines and lines[-1].strip():
+            lines.append("")
+        lines.append(VAPID_NOTE)
+        lines += [f"{k}={v}" for k, v in left.items()]
+    text = "\n".join(lines) + "\n"
+    if path.exists():
+        path.write_text(text, "utf-8")
+    else:
+        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(text)
+
+
+@push_app.command("keys")
+def push_keys(
+    env_file: Annotated[Path, typer.Option(help="키를 넣을 설정 파일")] = Path(".env"),
+    to_stdout: Annotated[
+        bool,
+        typer.Option("--print", help="파일 대신 표준 출력으로 (>> .env 처럼 파일로 보낼 때만)"),
+    ] = False,
+    force: Annotated[bool, typer.Option(help="이미 있는 키를 바꾼다 (모든 구독이 끊김)")] = False,
+):
+    """웹 푸시용 VAPID 키를 만들어 .env 에 넣는다. 비밀키는 화면과 로그에 보이지 않는다."""
+    import sys
+
+    from dartrag.feed.webpush import generate_vapid_keys
+
+    warn = (
+        "이미 VAPID 키가 있습니다. 바꾸면 지금까지의 웹 푸시 구독을 모두 쓸 수 없게 되어 "
+        "사용자가 다시 켜야 합니다. 정말 바꾸려면 --force 를 붙이세요."
+    )
+    if to_stdout:
+        if sys.stdout.isatty():
+            typer.echo(
+                "비밀키가 화면에 남지 않게 파일로 보낼 때만 출력합니다. "
+                "예: dartrag push keys --print >> .env",
+                err=True,
+            )
+            raise typer.Exit(1)
+        if get_settings().vapid_private_key and not force:
+            typer.echo(warn, err=True)
+            raise typer.Exit(1)
+        private, public = generate_vapid_keys()
+        typer.echo(f"\n{VAPID_NOTE}\nVAPID_PUBLIC_KEY={public}\nVAPID_PRIVATE_KEY={private}")
+        typer.echo(f"VAPID 키를 만들었습니다. 공개키: {public}", err=True)
+        return
+    lines = env_file.read_text("utf-8").splitlines() if env_file.exists() else []
+    if _env_value(lines, "VAPID_PRIVATE_KEY") and not force:
+        typer.echo(warn, err=True)
+        raise typer.Exit(1)
+    private, public = generate_vapid_keys()
+    _set_env_values(env_file, {"VAPID_PUBLIC_KEY": public, "VAPID_PRIVATE_KEY": private})
+    typer.echo(f"VAPID 키를 {env_file} 에 넣었습니다. 공개키: {public}")
+    if env_file.stat().st_mode & 0o077:
+        typer.echo(f"{env_file} 를 다른 사용자도 읽을 수 있습니다. chmod 600 {env_file}", err=True)
+    typer.echo("API 서버와 작업자를 다시 시작하면 웹 푸시 알림을 켤 수 있습니다.")
+
+
 @feed_app.command("show")
 def feed_show(
     days: int = 7,
@@ -926,6 +1011,25 @@ def user_password(email: str):
 
     repo.set_password(row[0], hash_password(_ask_password()))
     typer.echo("비밀번호를 바꿨습니다.")
+
+
+@user_app.command("2fa-off")
+def user_two_factor_off(email: str):
+    """2단계 인증 끄기. 인증 앱과 복구 코드를 모두 잃은 사용자를 본인 확인한 뒤에만 쓰세요.
+
+    그 계정의 모든 로그인도 끊습니다."""
+    repo = Repository.connect(get_settings().database_url)
+    row = repo.user_by_email(email.strip().lower())
+    if row is None:
+        typer.echo("없는 계정입니다.", err=True)
+        raise typer.Exit(1)
+    if not repo.disable_totp(row[0]):
+        typer.echo(f"{row[1]} 은 2단계 인증을 쓰지 않습니다.")
+        return
+    repo.revoke_sessions(row[0])
+    typer.echo(
+        f"{row[1]} 의 2단계 인증을 껐습니다. 다시 로그인한 뒤 계정 화면에서 새로 켜게 하세요."
+    )
 
 
 @user_app.command("list")
