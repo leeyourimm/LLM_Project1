@@ -1,4 +1,5 @@
 import logging
+from pathlib import Path
 from typing import Annotated
 
 import typer
@@ -201,6 +202,71 @@ def ask(
     for w in result.warnings:
         typer.echo(f"주의: {w}", err=True)
     typer.echo("\n※ 공시 정보 요약이며 투자 권유가 아닙니다.")
+
+
+eval_app = typer.Typer(help="답변 품질 평가")
+app.add_typer(eval_app, name="eval")
+
+
+@eval_app.command("generate")
+def eval_generate(
+    out: Path = Path("eval/generated.jsonl"),
+    per_company: int = 8,
+    seed: int = 0,
+):
+    """재무 DB 에서 정답이 있는 숫자 문항을 자동 생성."""
+    from dartrag.eval import save_cases
+    from dartrag.eval.generate import generate_cases, load_values
+
+    repo = Repository.connect(get_settings().database_url)
+    companies = repo.listed_companies()
+    values = load_values(repo, [c for c, _ in companies])
+    cases = generate_cases(companies, values, per_company=per_company, seed=seed)
+    if not cases:
+        typer.echo("재무 데이터가 없습니다. 먼저 collect 를 실행하세요.", err=True)
+        raise typer.Exit(1)
+    save_cases(out, cases)
+    typer.echo(f"{len(cases)}문항 → {out}")
+
+
+@eval_app.command("run")
+def eval_run(
+    files: list[Path],
+    out: Path = Path("reports/eval"),
+    limit: int | None = None,
+    min_pass_rate: float | None = None,
+):
+    """평가 문항으로 검색·답변을 실행하고 채점 리포트 작성."""
+    from datetime import datetime
+
+    from dartrag.answer import Answerer, OllamaLLM
+    from dartrag.eval import load_cases, run_eval, summarize, write_report
+    from dartrag.finance import FinanceTool
+
+    settings = get_settings()
+    cases = load_cases(*files)[:limit]
+    retriever, _, repo = _retriever(None, None, None)
+    llm = OllamaLLM(settings.llm_model, settings.ollama_url)
+    answerer = Answerer(retriever, llm, finance=FinanceTool(repo))
+
+    def progress(i, g):
+        mark = "통과" if g.passed else "실패: " + "; ".join(g.reasons)
+        typer.echo(f"[{i}/{len(cases)}] {g.case_id} {mark}")
+
+    grades = run_eval(cases, answerer.answer, repo.corp_codes_for_stocks, progress)
+    run_dir = out / datetime.now().strftime("%Y%m%d-%H%M%S")
+    meta = {
+        "llm": settings.llm_model,
+        "embed": settings.embed_model,
+        "cases": len(cases),
+        "files": ", ".join(str(f) for f in files),
+    }
+    report = write_report(run_dir, grades, meta)
+    rate = summarize(grades)["overall"]["pass_rate"] or 0.0
+    typer.echo(f"통과율 {rate:.1%} → {report}")
+    if min_pass_rate is not None and rate < min_pass_rate:
+        typer.echo(f"기준 통과율 {min_pass_rate:.0%} 미달", err=True)
+        raise typer.Exit(1)
 
 
 if __name__ == "__main__":
