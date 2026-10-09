@@ -18,7 +18,8 @@ pytestmark = pytest.mark.skipif(not URL, reason="TEST_DATABASE_URL 없음")
 def repo():
     conn = psycopg.connect(URL)
     conn.execute(
-        "DROP TABLE IF EXISTS diff_summaries, user_notifications, user_alert_channels, "
+        "DROP TABLE IF EXISTS data_issues, job_runs, backfill_state, diff_summaries, "
+        "user_notifications, user_alert_channels, "
         "feedback, messages, conversations, sessions, user_watchlist, "
         "users, notifications, watchlist, disclosures, chunks, financial_items, filings, "
         "companies, app_state CASCADE"
@@ -459,3 +460,92 @@ def test_diff_summary_storage(repo):
     saved = repo.diff_summary("a" * 14, "b" * 14)
     assert saved["model"] is None and saved["payload"]["old"]["rcept_dt"] == "2024-03-12"
     assert repo.latest_diff_summary_for("b" * 14) == saved["payload"]
+
+
+def feed_row(no, pblntf_ty="A", importance=2, corp="00126380"):
+    return {
+        "rcept_no": no,
+        "corp_code": corp,
+        "corp_name": "삼성전자",
+        "stock_code": "005930",
+        "corp_cls": "Y",
+        "report_nm": "사업보고서 (2025.12)",
+        "flr_nm": None,
+        "rcept_dt": date(2026, 3, 10),
+        "rm": None,
+        "pblntf_ty": pblntf_ty,
+        "event_type": "periodic_report",
+        "event_label": "정기보고서",
+        "importance": importance,
+        "correction": False,
+    }
+
+
+def test_ingest_queue_and_alert_hold(repo):
+    repo.upsert_companies([Corp(corp_code="00126380", corp_name="삼성전자", stock_code="005930")])
+    repo.set_watch("00126380", 2)
+    repo.insert_disclosures(
+        [
+            feed_row("20260310000001"),
+            feed_row("20260310000002", "B", 3),
+            feed_row("20260310000003", corp="99999999"),  # 우리 DB 에 없는 회사
+        ]
+    )
+    assert [d["rcept_no"] for d in repo.periodic_to_ingest()] == ["20260310000001"]
+    # 정기보고서 알림은 처리가 끝날 때까지 기다린다
+    assert [a["rcept_no"] for a in repo.pending_alerts("webhook")] == ["20260310000002"]
+    for _ in range(5):
+        repo.mark_ingest_failed("20260310000001", "boom")
+    assert repo.periodic_to_ingest() == []
+    assert repo.ingest_backlog()["failed"] == 1
+    # 5번 실패하면 더 기다리지 않고 알린다
+    assert len(repo.pending_alerts("webhook")) == 2
+    repo.conn.execute(
+        "UPDATE disclosures SET ingest_attempts = 0, ingest_error = NULL"
+        " WHERE rcept_no = '20260310000001'"
+    )
+    repo.mark_ingested("20260310000001")
+    assert repo.ingest_backlog()["pending"] == 0
+    assert len(repo.pending_alerts("webhook")) == 2
+
+
+def test_backfill_jobs_and_issues(repo):
+    from dartrag.finance.validate import Issue
+
+    repo.upsert_companies(
+        [
+            Corp(corp_code="00126380", corp_name="삼성전자", stock_code="005930"),
+            Corp(corp_code="00164779", corp_name="SK하이닉스", stock_code="000660"),
+            Corp(corp_code="99999999", corp_name="비상장", stock_code=None),
+        ]
+    )
+    assert repo.plan_backfill(2015, 2026) == 2
+    assert repo.plan_backfill(2015, 2026) == 0
+    assert repo.next_backfill(10) == [("00126380", 2015, 2026), ("00164779", 2015, 2026)]
+    repo.finish_backfill("00126380", 40)
+    repo.fail_backfill("00164779", "boom")
+    assert repo.backfill_progress() == {"pending": 0, "done": 1, "error": 1}
+    assert repo.next_backfill(10) == [("00164779", 2015, 2026)]
+    repo.plan_backfill(2010, 2026)  # 기간을 넓히면 다시 대기
+    assert repo.backfill_progress()["pending"] == 2
+
+    jid = repo.start_job("ingest")
+    repo.finish_job(jid, "ok", {"when": date(2026, 3, 10)})
+    repo.finish_job(repo.start_job("ingest"), "error", {"error": "x"})
+    last = repo.last_job_runs()["ingest"]
+    assert last["last_status"] == "error" and last["last_ok"] is not None
+    assert repo.recent_jobs(1)[0]["detail"] == {"error": "x"}
+    assert repo.purge_job_runs(1) == 0
+
+    a = Issue("00126380", 2024, "11011", "CFS", "balance", "error", "어긋남")
+    b = Issue("00126380", 2024, "11011", "CFS", "jump", "warn", "급변")
+    repo.replace_issues("00126380", [a, b])
+    first = {i["rule"]: i["first_seen"] for i in repo.data_issues("00126380")}
+    repo.replace_issues("00126380", [a])
+    again = repo.data_issues("00126380")
+    assert [i["rule"] for i in again] == ["balance"] and again[0]["first_seen"] == first["balance"]
+    assert again[0]["corp_name"] == "삼성전자"
+    assert repo.data_issues(severity="warn") == []
+    repo.replace_issues("00126380", [])
+    assert repo.data_issues() == []
+    assert repo.purge_expired_sessions() == 0 and repo.purge_user_notifications(90) == 0

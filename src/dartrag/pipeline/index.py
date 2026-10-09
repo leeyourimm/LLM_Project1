@@ -29,11 +29,12 @@ def index_filings(
     corp_codes: list[str] | None = None,
     *,
     batch_size: int = 64,
+    limit: int | None = None,
 ) -> IndexSummary:
     summary = IndexSummary()
     vector.ensure(embedder.dim)
     keyword.ensure()
-    for rcept_no in repo.filings_to_index(INDEX_VERSION, embedder.name, corp_codes):
+    for rcept_no in repo.filings_to_index(INDEX_VERSION, embedder.name, corp_codes)[:limit]:
         chunks = repo.indexed_chunks(rcept_no)
         try:
             # 재파싱으로 청크 ID 가 바뀌었을 수 있으니 공시 단위로 지우고 다시 넣는다

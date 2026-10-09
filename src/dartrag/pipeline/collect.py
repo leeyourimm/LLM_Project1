@@ -117,28 +117,48 @@ def _collect_company(
         report = parse_report_name(filing.report_nm)
         if report is None or not start_year <= report.period_year <= end_year:
             continue
-        reprt_code = report.reprt_code(fiscal_end)
+        collect_filing(
+            client, repo, store, filing, fiscal_end, summary, download_documents, fs_divs
+        )
 
-        raw_key = None
-        if download_documents:
-            raw_key = document_key(filing.rcept_no)
-            if store.exists(raw_key):
-                summary.documents_cached += 1
-            else:
-                store.put(raw_key, client.document(filing.rcept_no))
-                summary.documents_downloaded += 1
-        repo.upsert_filing(filing, report, reprt_code, raw_key)
-        summary.filings += 1
 
-        try:
-            bsns_year = bsns_year_for(report, fiscal_end)
-        except NotImplementedError:
-            summary.skipped.append(f"{filing.corp_name} {report.period_key}: 비12월 결산")
+def collect_filing(
+    client,
+    repo,
+    store,
+    filing,
+    fiscal_end: int,
+    summary: CollectSummary,
+    download_documents: bool = True,
+    fs_divs: tuple[str, ...] = ("CFS", "OFS"),
+) -> bool:
+    """정기보고서 한 건: 원문 저장, 공시 등록, 재무제표. 정기보고서가 아니면 False."""
+    report = parse_report_name(filing.report_nm)
+    if report is None:
+        return False
+    reprt_code = report.reprt_code(fiscal_end)
+
+    raw_key = None
+    if download_documents:
+        raw_key = document_key(filing.rcept_no)
+        if store.exists(raw_key):
+            summary.documents_cached += 1
+        else:
+            store.put(raw_key, client.document(filing.rcept_no))
+            summary.documents_downloaded += 1
+    repo.upsert_filing(filing, report, reprt_code, raw_key)
+    summary.filings += 1
+
+    try:
+        bsns_year = bsns_year_for(report, fiscal_end)
+    except NotImplementedError:
+        summary.skipped.append(f"{filing.corp_name} {report.period_key}: 비12월 결산")
+        return True
+    for fs_div in fs_divs:
+        rows = client.financial_statements(filing.corp_code, bsns_year, reprt_code, fs_div)
+        if not rows:
             continue
-        for fs_div in fs_divs:
-            rows = client.financial_statements(corp_code, bsns_year, reprt_code, fs_div)
-            if not rows:
-                continue
-            summary.financial_items += repo.replace_financials(
-                corp_code, bsns_year, reprt_code, fs_div, to_items(rows, fs_div)
-            )
+        summary.financial_items += repo.replace_financials(
+            filing.corp_code, bsns_year, reprt_code, fs_div, to_items(rows, fs_div)
+        )
+    return True

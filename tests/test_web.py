@@ -121,6 +121,19 @@ class FakeRepo:
     def company_by_stock(self, stock):
         return self.COMPANIES.get(stock)
 
+    def data_issues(self, corp_code=None, severity=None):
+        return [
+            {
+                "corp_code": corp_code,
+                "bsns_year": 2024,
+                "reprt_code": "11011",
+                "fs_div": "CFS",
+                "rule": "balance",
+                "severity": "error",
+                "detail": "자산총계 ≠ 부채총계+자본총계",
+            }
+        ]
+
     def financial_rows(self, corp_codes, reprt_code, sj_divs, account_ids, account_names):
         from dartrag.finance import FinancialRow
 
@@ -385,6 +398,7 @@ def test_company_dashboard(ctx):
     assert last["ratios"]["operating_margin"] == 10.88 and last["ratios"]["debt_ratio"] is None
     assert last["growth"]["revenue"] == 16.2 and last["rcept_no"] == "rcpt2024"
     assert r["disclosures"][0]["url"].endswith("rcpNo=20250311000001")
+    assert r["issues"][0]["rule"] == "balance" and "corp_code" not in r["issues"][0]
     assert repo.feed_args[1:] == (1, ["00126380"])
     client.post("/api/watchlist", json={"stock": "005930"})
     assert client.get("/api/company/005930").json()["watched"] is True

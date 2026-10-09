@@ -28,6 +28,13 @@ class DartApiError(RuntimeError):
         self.status = status
 
 
+class QuotaExceeded(DartApiError):
+    """오늘 쓰기로 정한 호출 수를 다 썼다 (OpenDART 하루 한도는 키당 20,000회)."""
+
+    def __init__(self, used: int, limit: int):
+        super().__init__("020", f"오늘 호출 한도 {limit}회 중 {used}회를 썼습니다")
+
+
 class OpenDartClient:
     def __init__(
         self,
@@ -37,6 +44,8 @@ class OpenDartClient:
         max_retries: int = 4,
         http: httpx.Client | None = None,
         sleep=time.sleep,
+        quota=None,
+        shared_throttle=None,
     ):
         if not api_key:
             raise ValueError("DART_API_KEY 가 비어 있습니다")
@@ -46,6 +55,9 @@ class OpenDartClient:
         self._http = http or httpx.Client(base_url=BASE_URL, timeout=60)
         self._sleep = sleep
         self._last_call = 0.0
+        # 여러 작업자가 같은 키를 나눠 쓸 때 하루 호출 수를 함께 센다 (dart/quota.py)
+        self._quota = quota
+        self._shared = shared_throttle
 
     def close(self) -> None:
         self._http.close()
@@ -59,6 +71,9 @@ class OpenDartClient:
     # --- 저수준 호출 -------------------------------------------------------
 
     def _throttle(self) -> None:
+        if self._shared is not None:
+            self._shared.wait()
+            return
         wait = self._min_interval - (time.monotonic() - self._last_call)
         if wait > 0:
             self._sleep(wait)
@@ -67,6 +82,8 @@ class OpenDartClient:
     def _get(self, path: str, params: dict) -> httpx.Response:
         params = {"crtfc_key": self._key, **params}
         for attempt in range(self._max_retries + 1):
+            if self._quota is not None:
+                self._quota.use()
             self._throttle()
             try:
                 resp = self._http.get(path, params=params)

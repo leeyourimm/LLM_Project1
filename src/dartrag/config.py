@@ -63,6 +63,17 @@ class Settings(BaseSettings):
     cookie_secure: bool = False  # https 로 서비스할 때 true
     session_days: int = 30
 
+    # 작업자(Celery). 주기는 분 단위
+    feed_poll_minutes: int = 10
+    ingest_minutes: int = 5
+    alerts_minutes: int = 5
+    backfill_enabled: bool = False  # 전체 상장사 과거 데이터 채우기 (며칠 걸림)
+    backfill_start_year: int = 2015
+    backfill_batch: int = 20  # 한 번에 처리할 회사 수
+    dart_daily_limit: int = 20_000  # OpenDART 키당 하루 호출 한도
+    dart_reserve: int = 3_000  # 과거 데이터 채우기가 남겨 둘 호출 수 (새 공시 처리용)
+    conversation_retention_days: int = 180
+
     # PDF 리포트 한글 글꼴(TTF). 비우면 나눔고딕·애플고딕·맑은 고딕을 차례로 찾는다
     report_font: str | None = None
 

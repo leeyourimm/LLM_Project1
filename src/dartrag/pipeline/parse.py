@@ -26,11 +26,11 @@ def parse_filings(
     corp_codes: list[str] | None = None,
     *,
     max_chars: int = 1500,
+    limit: int | None = None,
 ) -> ParseSummary:
     summary = ParseSummary()
-    for rcept_no, corp_code, corp_name, kind, period_key, raw_key in repo.filings_to_parse(
-        PARSER_VERSION, corp_codes
-    ):
+    todo = repo.filings_to_parse(PARSER_VERSION, corp_codes)
+    for rcept_no, corp_code, corp_name, kind, period_key, raw_key in todo[:limit]:
         label = " ".join(p for p in (period_key, kind) if p)
         try:
             docs = parse_document_zip(store.get(raw_key))
