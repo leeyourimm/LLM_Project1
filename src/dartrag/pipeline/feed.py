@@ -10,7 +10,7 @@ from dartrag.feed.notify import Notifier, format_alert
 
 log = logging.getLogger(__name__)
 
-DEFAULT_TYPES = ("B", "I")  # 주요사항보고, 거래소공시
+DEFAULT_TYPES = ("A", "B", "I")  # 정기공시(변경점 요약 알림), 주요사항보고, 거래소공시
 LISTED = ("Y", "K", "N")
 
 
@@ -67,10 +67,14 @@ def poll(
 
 
 def send_alerts(repo: Repository, notifier: Notifier) -> tuple[int, list[str]]:
+    """운영자 관심 종목 알림. 정기보고서에 변경점 요약이 있으면 핵심 문장을 붙인다."""
+    from dartrag.feed.alerts import _headline, format_item
+
     sent, errors = 0, []
     for d in repo.pending_alerts(notifier.channel):
+        headline = _headline(repo, d["rcept_no"])
         try:
-            notifier.send(format_alert(d))
+            notifier.send(format_item(d, headline) if headline else format_alert(d))
         except Exception as e:
             log.warning("알림 실패 %s: %s", d["rcept_no"], e)
             errors.append(f"{d['rcept_no']}: {e}")

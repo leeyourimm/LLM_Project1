@@ -59,6 +59,7 @@ RULES: list[tuple[re.Pattern, str, str, int]] = [
         (r"유형자산\s*(양수|양도|취득|처분)", "asset_transfer", "유형자산 거래", 2),
         (r"신규\s*시설\s*투자", "capex", "신규 시설투자", 2),
         (r"주식\s*분할|주식\s*병합", "stock_split", "주식 분할·병합", 2),
+        (r"^(사업|반기|분기)보고서", "periodic_report", "정기보고서", 2),
         (r"대량보유상황보고", "major_holding", "5% 대량보유 보고", 1),
         (r"임원\s*[ㆍ·]?\s*주요주주\s*특정증권", "insider_holding", "임원·주요주주 지분 변동", 1),
     ]
