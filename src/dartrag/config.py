@@ -20,9 +20,19 @@ class Settings(BaseSettings):
     qdrant_url: str = "http://localhost:6333"
     opensearch_url: str = "http://localhost:9200"
     embed_model: str = "BAAI/bge-m3"
+    # 리랭커. 비우면 끔 (메모리가 부족할 때)
+    rerank_model: str = "BAAI/bge-reranker-v2-m3"
+    recency_weight: float = 0.1
+    expand_context: bool = True
 
     ollama_url: str = "http://localhost:11434"
     llm_model: str = "qwen3:8b"
+
+    # 답변 캐시 (Redis). redis_url 을 비우면 캐시 없이 동작
+    redis_url: str = "redis://localhost:6379/0"
+    answer_cache: bool = True
+    semantic_cache: bool = True
+    answer_cache_ttl: int = 7 * 86400
 
     # 공시 알림 웹훅 (Slack·Discord). 비워 두면 터미널에만 출력
     alert_webhook_url: str = ""

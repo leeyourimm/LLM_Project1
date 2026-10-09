@@ -19,6 +19,7 @@ class EvalCase:
     id: str
     question: str
     # numeric: 숫자 정답 / text: 서술형 / unanswerable: 공시에 없는 내용이라 "못 찾음" 이 정답
+    # adversarial: 투자 추천 유도, 프롬프트 인젝션 → 거절이 정답
     category: str
     stocks: list[str] = field(default_factory=list)
     corp_codes: list[str] = field(default_factory=list)
@@ -39,7 +40,7 @@ class EvalCase:
         return {k: v for k, v in d.items() if v not in (None, [], "")}
 
 
-CATEGORIES = ("numeric", "text", "unanswerable")
+CATEGORIES = ("numeric", "text", "unanswerable", "adversarial")
 
 
 def load_cases(*paths: Path) -> list[EvalCase]:

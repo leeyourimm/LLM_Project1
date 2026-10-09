@@ -99,19 +99,14 @@ def parse():
 
 
 def _search_backends(settings):
-    from qdrant_client import QdrantClient
+    from dartrag.factory import Backends
 
-    from dartrag.search import KeywordIndex, SentenceTransformerEmbedder, VectorIndex
-
-    return (
-        SentenceTransformerEmbedder(settings.embed_model),
-        VectorIndex(QdrantClient(url=settings.qdrant_url)),
-        KeywordIndex.connect(settings.opensearch_url),
-    )
+    b = Backends(settings)
+    return b.embedder, b.vector, b.keyword
 
 
-def _retriever(stocks, year_from, year_to):
-    from dartrag.search import HybridRetriever
+def _context(stocks, year_from, year_to):
+    from dartrag.factory import Backends
 
     logging.getLogger("httpx").setLevel(logging.WARNING)
     settings = get_settings()
@@ -120,10 +115,15 @@ def _retriever(stocks, year_from, year_to):
     if stocks and not corp_codes:
         typer.echo("해당 종목코드의 기업이 DB에 없습니다. 먼저 collect 를 실행하세요.", err=True)
         raise typer.Exit(1)
-    embedder, vector, keyword = _search_backends(settings)
-    retriever = HybridRetriever(embedder, vector, keyword, repo.get_chunks)
     flt = SearchFilter(corp_codes=corp_codes, year_from=year_from, year_to=year_to)
-    return retriever, flt, repo
+    return Backends(settings), flt, repo
+
+
+def _retriever(stocks, year_from, year_to):
+    from dartrag.factory import build_retriever
+
+    backends, flt, repo = _context(stocks, year_from, year_to)
+    return build_retriever(backends, repo), flt, repo
 
 
 @app.command()
@@ -177,16 +177,11 @@ def ask(
     year_to: int | None = None,
 ):
     """공시를 근거로 질문에 답하기 (출처 번호 포함)."""
-    from dartrag.answer import Answerer, LLMError, OllamaLLM
-    from dartrag.finance import FinanceTool
+    from dartrag.answer import LLMError
+    from dartrag.factory import build_answerer
 
-    settings = get_settings()
-    retriever, flt, repo = _retriever(stocks, year_from, year_to)
-    answerer = Answerer(
-        retriever,
-        OllamaLLM(settings.llm_model, settings.ollama_url),
-        finance=FinanceTool(repo),
-    )
+    backends, flt, repo = _context(stocks, year_from, year_to)
+    answerer = build_answerer(backends, repo)
     try:
         result = answerer.answer(question, flt)
     except LLMError as e:
@@ -416,15 +411,15 @@ def eval_run(
     """평가 문항으로 검색·답변을 실행하고 채점 리포트 작성."""
     from datetime import datetime
 
-    from dartrag.answer import Answerer, OllamaLLM
+    from dartrag.answer.prompt import PROMPT_VERSION
     from dartrag.eval import load_cases, run_eval, summarize, write_report
-    from dartrag.finance import FinanceTool
+    from dartrag.factory import build_answerer
 
     settings = get_settings()
     cases = load_cases(*files)[:limit]
-    retriever, _, repo = _retriever(None, None, None)
-    llm = OllamaLLM(settings.llm_model, settings.ollama_url)
-    answerer = Answerer(retriever, llm, finance=FinanceTool(repo))
+    backends, _, repo = _context(None, None, None)
+    # 평가는 매번 실제로 답을 만들어야 하므로 캐시를 쓰지 않는다
+    answerer = build_answerer(backends, repo, use_cache=False)
 
     def progress(i, g):
         mark = "통과" if g.passed else "실패: " + "; ".join(g.reasons)
@@ -435,6 +430,8 @@ def eval_run(
     meta = {
         "llm": settings.llm_model,
         "embed": settings.embed_model,
+        "rerank": settings.rerank_model or "-",
+        "prompt": PROMPT_VERSION,
         "cases": len(cases),
         "files": ", ".join(str(f) for f in files),
     }
