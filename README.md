@@ -167,6 +167,16 @@ dartrag ask "2024년 HBM 매출 비중은?" -s 005930
   - 개발할 때: `dartrag serve`를 켠 상태에서 `cd frontend`, `npm install`, `npm run dev` 순서로 실행하고 http://localhost:3000 을 엽니다. `/api` 요청은 `API_ORIGIN`(기본 http://127.0.0.1:8000)으로 넘깁니다. 이때 `.env`에 `ALLOWED_ORIGINS=http://localhost:3000`을 넣어야 저장·질문 요청이 막히지 않습니다.
   - 배포용 빌드는 `npm run build` 후 `npm start`입니다. 기존 정적 화면(`dartrag serve`의 http://127.0.0.1:8000)도 그대로 씁니다.
 
+- **운영 관측과 품질 관리** (`obs/`, `eval/gate.py`, `infra/monitoring/`):
+  - 지표: API 서버의 `/metrics`에 요청 수·응답 시간, 답변 결과(답함·못 찾음·거절·캐시·실패), 검색·첫 글자·생성 단계별 시간, 토큰 수, 👍/👎, 요청 한도 초과, 작업자 상태, 처리 대기, 데이터 검증 오류, OpenDART 사용량, 최근 평가 결과를 내보냅니다.
+  - 대시보드: `docker compose -f infra/docker-compose.yml --profile monitoring up -d` 후 http://localhost:3002 (Grafana, 처음 계정 admin/admin). 경보 규칙 11개(API 멈춤, 답변 실패 급증, 피드 1시간 이상 멈춤, OpenDART 한도 90% 등)가 들어 있습니다.
+  - LLM 추적: `--profile langfuse`로 Langfuse를 띄우고 `.env`에 `LANGFUSE_HOST=http://localhost:3001`을 넣으면 질문마다 검색 결과, 모델에 보낸 내용, 답변, 토큰, 첫 글자까지 걸린 시간이 http://localhost:3001 에 남습니다(처음 계정 admin@dartrag.local / dartrag-admin). 메모리를 2~3GB 더 씁니다.
+  - 오류 수집: `.env`에 `SENTRY_DSN`을 넣으면 API와 작업자의 오류가 Sentry로 갑니다. 질문 내용, 이메일, 쿠키, 지역 변수는 보내기 전에 지웁니다.
+  - 요청 한도: 질문은 사용자마다 1분 6번·하루 200번, 비교 설명·변경점 요약 새로 만들기·요약 PDF는 1시간 10번이 기본입니다. 넘으면 429와 다시 시도할 시간을 돌려줍니다.
+  - 배포 기준: `eval/release_criteria.toml`에 통과율·검색 적중률·출처 표시율·숫자 확인 실패율·응답 시간 기준과 기준선 대비 하락 허용폭이 있습니다. `dartrag eval run ... --gate`가 기준 미달이면 실패하고, 결과를 `dartrag eval baseline`으로 `eval/baseline.json`에 저장해 올리면 CI가 그 기준선과 프롬프트 버전을 검사합니다.
+  - 정기 평가: `EVAL_SCHEDULE_ENABLED=true`면 일요일 새벽에 평가 문항 일부로 품질을 재고 대시보드에 보여 줍니다.
+  - 👎 받은 질문: `dartrag feedback export`로 후보에 모으고, 정답을 채운 뒤 `dartrag eval promote`로 평가셋에 옮깁니다.
+
 ## 알려진 제한
 - 결산월이 12월이 아닌 회사는 재무제표 API의 사업연도(`bsns_year`) 기준을 실제 응답으로 검증하기 전까지 재무 수집을 건너뜁니다 (원문은 수집). 결산월 정보도 아직 기본값 12로 저장됩니다.
 - 계정과목 표준화(회사별 계정명 → 표준 코드)는 1~2단계에서 추가합니다.
