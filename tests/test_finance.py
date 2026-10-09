@@ -1,0 +1,162 @@
+from decimal import Decimal
+
+import pytest
+
+from dartrag.answer import Answerer
+from dartrag.finance import FinanceTool, FinancialRow, parse_question
+from dartrag.finance.accounts import METRICS
+from dartrag.finance.calc import fmt_pct, fmt_won, growth, ratio
+from dartrag.finance.query import find_companies
+from dartrag.finance.tool import pick_values
+from dartrag.search import SearchFilter
+
+SAMSUNG, HYNIX = "00126380", "00164779"
+COMPANIES = [(SAMSUNG, "삼성전자"), (HYNIX, "에스케이하이닉스"), ("00126371", "삼성전자우")]
+
+
+@pytest.mark.parametrize(
+    "question, metrics, ratios, years, reprt, growth_",
+    [
+        ("2024년 영업이익률은?", [], ["operating_margin"], [2024], "11011", False),
+        ("2022~2024 매출 추이", ["revenue"], [], [2022, 2023, 2024], "11011", True),
+        ("24년 3분기 부채비율", [], ["debt_ratio"], [2024], "11014", False),
+        ("2024년 매출 증가율", ["revenue"], [], [2023, 2024], "11011", True),
+        ("상반기 당기순이익과 자산총계", ["net_income", "total_assets"], [], [], "11012", False),
+    ],
+)
+def test_parse_question(question, metrics, ratios, years, reprt, growth_):
+    q = parse_question(question, COMPANIES, [SAMSUNG])
+    assert (q.metrics, q.ratios, q.years, q.reprt_code, q.growth) == (
+        metrics,
+        ratios,
+        years,
+        reprt,
+        growth_,
+    )
+
+
+def test_parse_question_non_financial_or_no_company():
+    assert parse_question("HBM 사업 전략은?", COMPANIES, [SAMSUNG]) is None
+    assert parse_question("영업이익은?", COMPANIES, []) is None
+
+
+def test_find_companies_handles_aliases_and_overlaps():
+    assert find_companies("SK하이닉스와 삼성전자 비교", COMPANIES) == [HYNIX, SAMSUNG]
+    assert find_companies("삼성전자우 배당", COMPANIES) == ["00126371"]
+
+
+def test_ratio_needs_components():
+    q = parse_question("2024년 영업이익률", COMPANIES, [SAMSUNG])
+    assert q.needed_metrics == ["operating_income", "revenue"]
+
+
+def test_calc():
+    assert growth(120, 100) == Decimal(20)
+    assert growth(-50, -100) == Decimal(50)  # 적자 축소
+    assert growth(10, -5) is None and growth(5, 0) is None  # 흑자 전환, 0 기준
+    assert ratio(1, 3).quantize(Decimal("0.01")) == Decimal("33.33")
+    assert ratio(1, 0) is None
+    assert fmt_pct(Decimal("16.249")) == "16.2%" and fmt_pct(Decimal("0.05")) == "0.1%"
+    assert fmt_won(302_231_360_000_000) == "302조 2,314억원 (302,231,360,000,000원)"
+    assert fmt_won(-123_456_789_012, exact=False) == "-1,235억원"
+    assert fmt_won(9_999_999_950_000_000, exact=False) == "10,000조원"
+    assert fmt_won(9_999) == "9,999원"
+
+
+def row(year, amount, fs="CFS", aid="ifrs-full_Revenue", nm="매출액", corp=SAMSUNG):
+    return FinancialRow(corp, year, fs, aid, nm, amount, f"2025031100000{year % 10}")
+
+
+def test_pick_values_prefers_consolidated_and_standard_id():
+    rows = [
+        row(2024, 1, fs="OFS"),
+        row(2024, 2, aid="-표준계정코드 미사용-", nm="영업수익"),
+        row(2024, 3),
+        row(2023, 4, aid="-표준계정코드 미사용-", nm="수익(매출액)"),
+        row(2023, None),
+        row(2022, 5, aid="x", nm="기타수익"),  # 매핑에 없는 계정
+    ]
+    got = pick_values(rows, METRICS["revenue"])
+    assert {k: v.amount for k, v in got.items()} == {(SAMSUNG, 2024): 3, (SAMSUNG, 2023): 4}
+
+
+class FakeRepo:
+    def __init__(self, rows):
+        self.rows = rows
+        self.calls = []
+
+    def listed_companies(self):
+        return COMPANIES
+
+    def financial_rows(self, corp_codes, reprt_code, sj_divs, account_ids, account_names):
+        self.calls.append((tuple(corp_codes), reprt_code, sj_divs))
+        return [r for r in self.rows if r.corp_code in corp_codes and (r.account_id in account_ids)]
+
+
+ROWS = [
+    row(2023, 258_935_494_000_000),
+    row(2024, 300_870_903_000_000),
+    row(2023, 6_566_976_000_000, aid="dart_OperatingIncomeLoss", nm="영업이익"),
+    row(2024, 32_725_961_000_000, aid="dart_OperatingIncomeLoss", nm="영업이익"),
+]
+
+
+def test_finance_tool_renders_table_and_calculations():
+    tool = FinanceTool(FakeRepo(ROWS))
+    hit = tool.lookup("삼성전자 2024년 매출 증가율과 영업이익률")
+    body = hit.chunk["body"]
+    assert "| 삼성전자 | 2024 | 연결 | 매출액 | 300조 8,709억원 (300,870,903,000,000원) |" in body
+    assert "매출액 2023→2024 증감률: 16.2%" in body
+    assert "2024 영업이익률: 10.9%" in body
+    assert "2023 영업이익률: 2.5%" in body
+    assert hit.chunk["section_path"] == ["재무 데이터"]
+    assert hit.chunk["url"].startswith("https://dart.fss.or.kr/")
+
+
+def test_finance_tool_latest_year_and_missing_data():
+    tool = FinanceTool(FakeRepo(ROWS))
+    body = tool.lookup("매출액은?", SearchFilter(corp_codes=[SAMSUNG])).chunk["body"]
+    assert "| 2024 |" in body and "| 2023 |" not in body
+    body = tool.lookup("2022~2024 매출액", SearchFilter(corp_codes=[SAMSUNG])).chunk["body"]
+    assert "| 삼성전자 | 2022 | - | 매출액 | 데이터 없음 |" in body
+    assert tool.lookup("SK하이닉스 매출액") is None  # 데이터가 하나도 없으면 출처로 안 넣음
+    assert tool.lookup("HBM 전략") is None
+
+
+class FakeRetriever:
+    def __init__(self):
+        self.limits = []
+
+    def search(self, query, flt=None, limit=10):
+        self.limits.append(limit)
+        return []
+
+
+class FakeLLM:
+    name = "fake"
+
+    def __init__(self, reply):
+        self.reply = reply
+        self.messages = None
+
+    def chat(self, messages):
+        self.messages = messages
+        return self.reply
+
+
+def test_answerer_puts_finance_first_and_verifies_its_numbers():
+    retriever = FakeRetriever()
+    llm = FakeLLM("2024년 매출은 300.9조원으로 전년보다 16.2% 늘었습니다 [1].")
+    answerer = Answerer(retriever, llm, finance=FinanceTool(FakeRepo(ROWS)), top_k=8)
+    result = answerer.answer("삼성전자 2024년 매출 증가율")
+    assert retriever.limits == [7]
+    assert "[1] 삼성전자 | OpenDART 재무제표 (연간) | 재무 데이터" in llm.messages[1].content
+    assert result.citations[0].hit.chunk_id == "finance"
+    assert result.warnings == []
+
+    wrong = Answerer(
+        FakeRetriever(),
+        FakeLLM("매출은 16.5% 늘었습니다 [1]."),
+        finance=FinanceTool(FakeRepo(ROWS)),
+    ).answer("삼성전자 2024년 매출 증가율")
+    assert wrong.unverified == ["16.5%"]

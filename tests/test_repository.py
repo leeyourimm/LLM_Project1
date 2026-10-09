@@ -166,3 +166,31 @@ def test_index_state_and_pipeline(repo):
     assert list(got) == ["c2"]
     assert got["c2"]["body"] == "매출 2"
     assert got["c2"]["url"].endswith("rcpNo=20250311000001")
+
+
+def test_financial_rows_match_by_id_or_name(repo):
+    repo.upsert_companies(
+        [
+            Corp(corp_code="00126380", corp_name="삼성전자", stock_code="005930"),
+            Corp(corp_code="99999999", corp_name="비상장", stock_code=None),
+        ]
+    )
+    assert repo.listed_companies() == [("00126380", "삼성전자")]
+    repo.replace_financials(
+        "00126380",
+        2024,
+        "11011",
+        "CFS",
+        [
+            item(100, account_id="dart_OperatingIncomeLoss", account_nm="영업이익"),
+            item(200, account_id="-표준계정코드 미사용-", account_nm="영업 이익", ord=2),
+            item(300, account_id="x", account_nm="기타", ord=3),
+            item(400, account_id="dart_OperatingIncomeLoss", sj_div="BS", ord=4),
+        ],
+    )
+    rows = repo.financial_rows(
+        ["00126380"], "11011", ("IS", "CIS"), ("dart_OperatingIncomeLoss",), ("영업이익",)
+    )
+    assert sorted(r.amount for r in rows) == [100, 200]
+    assert {r.account_nm for r in rows} == {"영업이익"}
+    assert rows[0].bsns_year == 2024 and rows[0].fs_div == "CFS"
