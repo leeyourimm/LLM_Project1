@@ -2,6 +2,7 @@
 
 상장사 공시를 수집해서 **근거를 대며 답하고, 수치를 정확히 보여주고, 변화가 생기면 알려주는** 서비스입니다.
 전체 설계는 [docs/design.md](docs/design.md)에 있습니다.
+AWS 서버 한 대에 배포하는 방법은 [docs/terraform.md](docs/terraform.md)에 있습니다.
 주요 기술 선택의 이유는 [의사결정 기록(ADR)](docs/adr/README.md)에, 보안 점검 결과는 [docs/security-review.md](docs/security-review.md)에 있습니다.
 
 > 이 서비스는 공시 정보의 검색·요약을 제공하며 투자 권유가 아닙니다.

@@ -7,5 +7,13 @@ __pycache__/
 .ruff_cache/
 dist/
 reports/
-infra/prod/backups/
+
+# Terraform: 상태 파일, 내려받은 프로바이더, 실제 변수 값은 올리지 않음
+.terraform/
+*.tfstate
+*.tfstate.*
+terraform.tfvars
+*.auto.tfvars
+crash.log
 .claude/
+infra/prod/backups/

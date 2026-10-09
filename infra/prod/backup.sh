@@ -7,7 +7,8 @@
 # - 30일이 지난 백업은 지운다. 개인정보 처리방침에 "백업 사본은 최대 30일 뒤 사라진다"고
 #   약속했으므로 보관 기간을 늘리지 않는다.
 # - BACKUP_S3_BUCKET(예: my-bucket/dartrag)을 넣으면 aws cli 로 S3 에도 올리고,
-#   S3 에서도 30일이 지난 것을 지운다.
+#   S3 에서도 30일이 지난 것을 지운다. 지울 권한이 없으면(Terraform 으로 만든 서버는 일부러
+#   삭제 권한을 주지 않는다) 경고만 남기고, 버킷의 수명 주기 규칙이 30일 안에 지운다.
 # - OpenSearch 색인은 Postgres 에서 다시 만들 수 있어(dartrag index) 백업하지 않는다.
 # 매일 새벽에 돌리려면 docs/deploy.md 의 cron 설정을 보세요.
 set -euo pipefail
@@ -61,8 +62,11 @@ if [ -n "$BACKUP_S3_BUCKET" ]; then
   aws s3 ls "$s3/" | awk '$1 == "PRE" {print $2}' | while read -r prefix; do
     day="${prefix%%-*}"
     if [[ "$day" =~ ^[0-9]{8}$ ]] && [ "$day" -le "$cutoff" ]; then
-      aws s3 rm --recursive --only-show-errors "$s3/$prefix"
-      echo "s3: 오래된 백업 삭제 $prefix"
+      if aws s3 rm --recursive --only-show-errors "$s3/$prefix"; then
+        echo "s3: 오래된 백업 삭제 $prefix"
+      else
+        echo "s3: $prefix 를 지울 수 없음 (권한 없음). 버킷 수명 주기 규칙이 지워야 한다" >&2
+      fi
     fi
   done
 fi

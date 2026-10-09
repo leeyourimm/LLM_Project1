@@ -34,6 +34,21 @@ jobs:
       # 프롬프트·모델을 바꾸면 실제 평가 결과(eval/baseline.json)도 함께 올려야 통과
       - run: dartrag eval ci-check
 
+  terraform:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: infra/terraform
+    steps:
+      - uses: actions/checkout@v4
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "1.16.5"
+      - run: terraform fmt -check -recursive
+      # AWS 자격 증명 없이 문법과 참조만 검사(원격 상태와 실제 AWS에는 접속하지 않음)
+      - run: terraform init -backend=false -input=false
+      - run: terraform validate
+
   frontend:
     runs-on: ubuntu-latest
     defaults:

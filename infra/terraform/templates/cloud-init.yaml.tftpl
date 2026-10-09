@@ -1,0 +1,135 @@
+#cloud-config
+# 서버를 처음 켤 때 한 번만 실행됩니다. 비밀값(API 키, 비밀번호)은 여기에 넣지 않습니다.
+# 진행 기록: /var/log/dartrag-bootstrap.log, /var/log/cloud-init-output.log
+
+package_update: true
+packages:
+  - ca-certificates
+  - curl
+  - git
+  - jq
+
+write_files:
+  - path: /etc/docker/daemon.json
+    permissions: "0644"
+    content: |
+      {
+        "data-root": "${data_mount_dir}/docker",
+        "log-driver": "json-file",
+        "log-opts": { "max-size": "10m", "max-file": "3" }
+      }
+
+  # 데이터 디스크가 붙기 전에 Docker가 켜져 루트 디스크에 데이터를 쓰는 일을 막습니다.
+  - path: /etc/systemd/system/docker.service.d/override.conf
+    permissions: "0644"
+    content: |
+      [Unit]
+      RequiresMountsFor=${data_mount_dir}
+
+  # Docker 컨테이너가 host.docker.internal:11434로 호스트의 Ollama에 접속할 수 있도록
+  # 모든 인터페이스에서 받습니다. 11434 포트는 보안 그룹에서 열지 않았으므로 외부에서는 닿지 않습니다.
+  - path: /etc/systemd/system/ollama.service.d/override.conf
+    permissions: "0644"
+    content: |
+      [Unit]
+      RequiresMountsFor=${data_mount_dir}
+      [Service]
+      Environment="OLLAMA_HOST=0.0.0.0:11434"
+      Environment="OLLAMA_MODELS=${data_mount_dir}/ollama"
+
+  - path: /usr/local/sbin/dartrag-bootstrap.sh
+    permissions: "0755"
+    content: |
+      #!/usr/bin/env bash
+      set -euo pipefail
+      DATA_DIR="${data_mount_dir}"
+      APP_DIR="$DATA_DIR/app"
+
+      echo "== 1/5 데이터 디스크 연결 =="
+      DEV=""
+      for _ in $(seq 1 120); do
+        for c in /dev/disk/by-id/nvme-Amazon_Elastic_Block_Store_${data_volume_serial} /dev/xvdf /dev/sdf; do
+          if [ -b "$c" ]; then
+            DEV="$(readlink -f "$c")"
+            break 2
+          fi
+        done
+        sleep 5
+      done
+      if [ -z "$DEV" ]; then
+        echo "데이터 디스크를 찾지 못했습니다." >&2
+        exit 1
+      fi
+      # 비어 있는 새 디스크일 때만 포맷합니다(재부팅이나 서버 교체 때 데이터 보존).
+      if ! blkid "$DEV" >/dev/null 2>&1; then
+        mkfs.ext4 -L dartrag-data "$DEV"
+      fi
+      mkdir -p "$DATA_DIR"
+      UUID="$(blkid -s UUID -o value "$DEV")"
+      if ! grep -q "$UUID" /etc/fstab; then
+        echo "UUID=$UUID $DATA_DIR ext4 defaults,nofail,x-systemd.device-timeout=30 0 2" >> /etc/fstab
+      fi
+      systemctl daemon-reload
+      mountpoint -q "$DATA_DIR" || mount "$DATA_DIR"
+
+      echo "== 2/5 Docker Engine, compose 플러그인 설치 =="
+      install -m 0755 -d /etc/apt/keyrings
+      curl -fsSL https://download.docker.com/linux/ubuntu/gpg -o /etc/apt/keyrings/docker.asc
+      chmod a+r /etc/apt/keyrings/docker.asc
+      CODENAME="$(. /etc/os-release && echo "$VERSION_CODENAME")"
+      ARCH="$(dpkg --print-architecture)"
+      echo "deb [arch=$ARCH signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/ubuntu $CODENAME stable" > /etc/apt/sources.list.d/docker.list
+      apt-get update
+      DEBIAN_FRONTEND=noninteractive apt-get install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
+      usermod -aG docker ubuntu
+      systemctl enable --now docker
+
+      echo "== 3/5 AWS CLI 설치(백업 업로드용) =="
+      snap install aws-cli --classic || true
+
+      echo "== 4/5 Ollama 설치, 모델 내려받기 =="
+      mkdir -p "$DATA_DIR/ollama"
+      curl -fsSL https://ollama.com/install.sh | sh
+      chown -R ollama:ollama "$DATA_DIR/ollama"
+      systemctl daemon-reload
+      systemctl enable ollama
+      systemctl restart ollama
+      for _ in $(seq 1 60); do
+        curl -fsS http://127.0.0.1:11434/api/version >/dev/null 2>&1 && break
+        sleep 2
+      done
+      for attempt in 1 2 3; do
+        if ollama pull "${ollama_model}"; then
+          break
+        fi
+        echo "모델 내려받기 실패($attempt/3), 30초 뒤 다시 시도합니다."
+        sleep 30
+      done
+
+      echo "== 5/5 저장소 clone =="
+      if [ ! -d "$APP_DIR/.git" ]; then
+        git clone --branch "${git_ref}" "${repo_url}" "$APP_DIR"
+      fi
+      chown -R ubuntu:ubuntu "$APP_DIR"
+
+      cat > "$DATA_DIR/NEXT_STEPS.txt" <<'NEXT'
+      서버 준비가 끝났습니다. 다음 순서로 서비스를 시작하세요(docs/terraform.md 참고).
+
+        sudo -iu ubuntu
+        cd ${data_mount_dir}/app
+        nano infra/prod/.env
+        docker compose -f infra/prod/docker-compose.yml up -d
+        docker compose -f infra/prod/docker-compose.yml ps
+
+      - .env의 비밀값(OpenDART 키, DB 비밀번호 등)은 이 서버에서만 직접 입력하세요.
+      - Ollama 주소: 컨테이너 안에서는 http://host.docker.internal:11434
+        (compose 서비스에 extra_hosts: ["host.docker.internal:host-gateway"] 필요)
+      - 백업 버킷: s3://${backup_bucket} (리전 ${aws_region})
+      NEXT
+      chown ubuntu:ubuntu "$DATA_DIR/NEXT_STEPS.txt"
+      cat "$DATA_DIR/NEXT_STEPS.txt"
+
+runcmd:
+  - [bash, -c, "/usr/local/sbin/dartrag-bootstrap.sh 2>&1 | tee -a /var/log/dartrag-bootstrap.log"]
+
+final_message: "dartrag 부트스트랩 완료 ($UPTIME초). 다음 단계: cat ${data_mount_dir}/NEXT_STEPS.txt"
