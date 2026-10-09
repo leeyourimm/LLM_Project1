@@ -844,8 +844,9 @@ def test_filing_freshness_and_dashboard_targets(repo):
     uid = repo.create_user("a@b.co", "h")
     repo.set_watch("00126380", 2, uid)
     repo.set_watch("00164779", 3, uid)
+    # 회사 이름 정렬은 DB 로캘마다 달라서 회사 코드 순서로 돌려준다
     assert repo.watched_companies() == [
-        ("00164779", "SK하이닉스", "000660"),
         ("00126380", "삼성전자", "005930"),
+        ("00164779", "SK하이닉스", "000660"),
     ]
     assert repo.companies_by_code(["00126380", "99999999"]) == [("00126380", "삼성전자", "005930")]

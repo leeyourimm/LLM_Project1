@@ -275,13 +275,13 @@ class Repository:
                WHERE c.stock_code IS NOT NULL AND (
                    EXISTS (SELECT 1 FROM watchlist w WHERE w.corp_code = c.corp_code)
                    OR EXISTS (SELECT 1 FROM user_watchlist u WHERE u.corp_code = c.corp_code))
-               ORDER BY c.corp_name"""
+               ORDER BY c.corp_code"""
         ).fetchall()
 
     def companies_by_code(self, corp_codes: list[str]) -> list[tuple[str, str, str]]:
         return self.conn.execute(
             """SELECT corp_code, corp_name, stock_code FROM companies
-               WHERE corp_code = ANY(%s) AND stock_code IS NOT NULL ORDER BY corp_name""",
+               WHERE corp_code = ANY(%s) AND stock_code IS NOT NULL ORDER BY corp_code""",
             (corp_codes,),
         ).fetchall()
 
