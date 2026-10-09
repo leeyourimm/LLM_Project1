@@ -440,9 +440,8 @@ def main() -> int:
         timings["캐시 답변"] = elapsed
         print(f"{describe(events)} ({elapsed:.1f}초)", flush=True)
         check_answer_stream(events, cached=True)
-    except SmokeFailure:
-        print(f"\n--- 서버 로그 (끝부분) ---\n{server.log_tail()}", flush=True)
-        raise
+    except SmokeFailure as e:
+        raise SmokeFailure(f"{e}\n\n--- 서버 로그 (끝부분) ---\n{server.log_tail(40)}") from None
     finally:
         server.stop()
 
@@ -462,4 +461,8 @@ if __name__ == "__main__":
         sys.exit(main())
     except SmokeFailure as e:
         print(f"\n실패: {e}", file=sys.stderr, flush=True)
+        if os.environ.get("GITHUB_ACTIONS"):
+            # 실패 이유를 Actions 주석으로도 남겨 로그를 열지 않고 볼 수 있게 한다
+            text = str(e)[-3000:].replace("%", "%25").replace("\r", "").replace("\n", "%0A")
+            print(f"::error title=종단 점검 실패::{text}", flush=True)
         sys.exit(1)

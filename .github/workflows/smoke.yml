@@ -185,7 +185,7 @@ jobs:
         run: |
           for c in opensearch ollama; do
             echo "::group::$c"
-            docker logs --tail 200 "$c" || true
+            docker logs --tail 60 "$c" || true
             echo "::endgroup::"
           done
 
