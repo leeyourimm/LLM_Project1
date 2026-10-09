@@ -24,7 +24,7 @@
 ```bash
 cp .env.example .env
 ```
-2. 설치하고 인프라를 띄웁니다 (Docker Desktop 실행 필요). Postgres 스키마는 첫 기동 때 자동 적용되고, 다시 적용하려면 `make migrate`를 실행합니다.
+2. 설치하고 인프라(Postgres, Redis)를 띄웁니다 (Docker Desktop 실행 필요). 검색용 Qdrant·OpenSearch는 1단계부터 `make up-search`로 띄웁니다. Postgres 스키마는 첫 기동 때 자동 적용되고, 다시 적용하려면 `make migrate`를 실행합니다.
 ```bash
 python3 -m venv .venv
 source .venv/bin/activate
@@ -41,7 +41,7 @@ dartrag collect
 - **OpenDART 클라이언트** (`src/dartrag/dart/client.py`): 고유번호, 공시 목록(페이지네이션, 최종 보고서만), 원문 zip, 단일회사 전체 재무제표. 호출 간격 제한, 요청 제한 초과(020)·점검(800)·5xx 재시도, 데이터 없음(013)은 빈 결과로 처리
 - **보고서 해석** (`dart/reports.py`): `[기재정정]사업보고서 (2023.12)` → 종류, 기간, 정정 여부, 보고서 코드. 결산월이 12월이 아닌 회사도 분기 코드를 올바르게 계산
 - **금액 정규화** (`normalize.py`): 쉼표, 괄호·△ 음수, 단위 → 원 단위 정수. 해석할 수 없는 값은 조용히 넘기지 않고 오류
-- **원문 저장소** (`storage/raw.py`): 로컬 또는 S3(MinIO). 이미 받은 원문은 다시 받지 않음
+- **원문 저장소** (`storage/raw.py`): 로컬 또는 S3 호환 저장소. 이미 받은 원문은 다시 받지 않음
 - **재무 DB** (`infra/db/001_init.sql`): 기업, 공시, 재무 계정. 연결/별도 구분, 원본 문자열 보관, 정정공시 시 해당 보고서 수치 통째 교체
 - **수집 파이프라인** (`pipeline/collect.py`): 상장사 동기화 → 정기공시 → 원문 → 재무제표(연결, 별도)
 

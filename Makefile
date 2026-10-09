@@ -1,4 +1,4 @@
-.PHONY: install up down migrate collect test lint
+.PHONY: install up up-search down migrate collect test lint
 
 install:
 	pip install -e ".[dev]"
@@ -6,8 +6,11 @@ install:
 up:
 	docker compose -f infra/docker-compose.yml up -d
 
+up-search:
+	docker compose -f infra/docker-compose.yml --profile search up -d
+
 down:
-	docker compose -f infra/docker-compose.yml down
+	docker compose -f infra/docker-compose.yml --profile search down
 
 migrate:
 	dartrag migrate
