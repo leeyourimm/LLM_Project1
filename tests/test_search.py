@@ -288,3 +288,26 @@ def test_models_load_on_first_use(monkeypatch):
     assert embedder.embed_query("매출") == [1.0, 0.0, 0.0] and embedder.dim == 3
     assert reranker.score("매출", ["a", "b"]) == [0.5, 0.5]
     assert loaded == ["emb", "rr"]  # 한 번만 불러온다
+
+
+def test_backends_build_nested_clients_without_deadlock(monkeypatch):
+    """vector 는 만드는 도중 qdrant 를 꺼낸다. 잠금이 다시 잡히지 않으면 질문이 영원히 멈춘다."""
+    import threading
+
+    import qdrant_client
+
+    from dartrag.config import Settings
+    from dartrag.factory import Backends
+
+    class Client:
+        def __init__(self, **kw):
+            self.kw = kw
+
+    monkeypatch.setattr(qdrant_client, "QdrantClient", Client)
+    backends = Backends(Settings(_env_file=None))
+    built = {}
+    worker = threading.Thread(target=lambda: built.update(vector=backends.vector), daemon=True)
+    worker.start()
+    worker.join(timeout=5)
+    assert not worker.is_alive(), "Backends.vector 가 멈췄습니다"
+    assert built["vector"].client is backends.qdrant
