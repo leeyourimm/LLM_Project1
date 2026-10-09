@@ -55,7 +55,7 @@ dartrag user add me@example.com
 - `COOKIE_SECURE=true`는 https로 서비스할 때만 켜세요. http에서 켜면 로그인이 유지되지 않습니다. 리버스 프록시 뒤에서 쓸 때는 실제 접속 IP가 보이도록 `uvicorn`의 `--proxy-headers` 설정이 필요합니다.
 
 ## 서버에 배포하기
-리눅스 서버 한 대에 Docker로 https 서비스를 띄우는 방법(처음 실행, 상태 확인, 로그, 업데이트, 백업·되돌리기, 모니터링)은 [docs/deploy.md](docs/deploy.md)에 있습니다. 설정 파일은 `infra/prod/`에 있습니다.
+리눅스 서버 한 대에 Docker로 https 서비스를 띄우는 방법(처음 실행, 상태 확인, 로그, 업데이트, 백업·되돌리기, 모니터링)은 [docs/deploy.md](docs/deploy.md)에 있습니다. 설정 파일은 `infra/prod/`에 있습니다. 돈 들이지 않고 Oracle Cloud 무료 서버(2코어·12GB)에 올리는 방법은 [docs/deploy-oracle.md](docs/deploy-oracle.md)에 있습니다.
 
 ## 빠른 시작
 명령어는 한 줄씩 실행하세요. (macOS 기본 셸 zsh는 줄 끝 `#` 주석을 인식하지 않습니다.)

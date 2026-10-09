@@ -107,7 +107,7 @@ def test_index_state_and_pipeline(repo):
     from qdrant_client import QdrantClient
 
     from dartrag.parsing import Chunk
-    from dartrag.pipeline.index import INDEX_VERSION, index_filings
+    from dartrag.pipeline.index import INDEX_VERSION, index_filings, rebuild_keyword_index
     from dartrag.search import SearchFilter, VectorIndex
 
     repo.upsert_companies([Corp(corp_code="00126380", corp_name="삼성전자", stock_code="005930")])
@@ -163,6 +163,12 @@ def test_index_state_and_pipeline(repo):
     assert sorted(vector.search([1.0, 0.0], SearchFilter(), 10)) == ["c1", "c2"]
     assert repo.filings_to_index(INDEX_VERSION, "fake") == []
     assert repo.has_indexed_filings()
+    assert repo.indexed_filing_numbers() == ["20250311000001"]
+    # 다른 서버로 옮긴 뒤: 임베딩 없이 DB 의 청크로 키워드 색인만 다시 채운다
+    moved = Keyword()
+    rebuilt = rebuild_keyword_index(repo, moved)
+    assert (rebuilt.filings, rebuilt.chunks, rebuilt.errors) == (1, 2, [])
+    assert moved.docs == ["c1", "c2"] and moved.deleted == ["20250311000001"] and moved.refreshed
     # 임베딩 모델이 바뀌면 다시 색인 대상
     assert repo.filings_to_index(INDEX_VERSION, "other") == ["20250311000001"]
 

@@ -29,8 +29,9 @@ BACKUP_DIR="${BACKUP_DIR:-$(env_value BACKUP_DIR)}"
 BACKUP_DIR="${BACKUP_DIR:-$HERE/backups}"
 BACKUP_S3_BUCKET="${BACKUP_S3_BUCKET:-$(env_value BACKUP_S3_BUCKET)}"
 
+# .env 의 COMPOSE_FILE·COMPOSE_PROFILES(작은 서버용 덮어쓰기 등)도 따르도록 이 폴더에서 실행한다
 compose() {
-  docker compose -f "$HERE/docker-compose.yml" "$@"
+  (cd "$HERE" && docker compose "$@")
 }
 
 stamp="$(date +%Y%m%d-%H%M%S)"
