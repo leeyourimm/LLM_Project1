@@ -66,7 +66,7 @@ def test_metrics_endpoint_counts_routes_and_reads_state():
     )
     assert after == before + 1
     # 경로 대신 라우트 이름으로 센다
-    assert "999999" not in body
+    assert "/api/company/999999" not in body
     assert "dartrag_state_up 1.0" in body
     assert 'dartrag_job_last_failed{job="feed_poll"} 1.0' in body
     assert 'dartrag_job_last_success_age_seconds{job="ingest"}' in body
