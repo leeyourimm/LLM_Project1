@@ -21,6 +21,9 @@ class Settings(BaseSettings):
     opensearch_url: str = "http://localhost:9200"
     embed_model: str = "BAAI/bge-m3"
 
+    ollama_url: str = "http://localhost:11434"
+    llm_model: str = "qwen3:8b"
+
 
 @lru_cache
 def get_settings() -> Settings:

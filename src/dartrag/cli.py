@@ -109,6 +109,21 @@ def _search_backends(settings):
     )
 
 
+def _retriever(stocks, year_from, year_to):
+    from dartrag.search import HybridRetriever
+
+    logging.getLogger("httpx").setLevel(logging.WARNING)
+    settings = get_settings()
+    repo = Repository.connect(settings.database_url)
+    corp_codes = repo.corp_codes_for_stocks(stocks) if stocks else []
+    if stocks and not corp_codes:
+        typer.echo("해당 종목코드의 기업이 DB에 없습니다. 먼저 collect 를 실행하세요.", err=True)
+        raise typer.Exit(1)
+    embedder, vector, keyword = _search_backends(settings)
+    retriever = HybridRetriever(embedder, vector, keyword, repo.get_chunks)
+    return retriever, SearchFilter(corp_codes=corp_codes, year_from=year_from, year_to=year_to)
+
+
 @app.command()
 def index():
     """파싱한 청크를 임베딩해 벡터·키워드 검색 인덱스에 넣기."""
@@ -136,18 +151,7 @@ def search(
     limit: int = 5,
 ):
     """하이브리드 검색 결과 확인 (답변 생성 없이 근거 청크만)."""
-    from dartrag.search import HybridRetriever
-
-    logging.getLogger("httpx").setLevel(logging.WARNING)
-    settings = get_settings()
-    repo = Repository.connect(settings.database_url)
-    corp_codes = repo.corp_codes_for_stocks(stocks) if stocks else []
-    if stocks and not corp_codes:
-        typer.echo("해당 종목코드의 기업이 DB에 없습니다. 먼저 collect 를 실행하세요.", err=True)
-        raise typer.Exit(1)
-    embedder, vector, keyword = _search_backends(settings)
-    retriever = HybridRetriever(embedder, vector, keyword, repo.get_chunks)
-    flt = SearchFilter(corp_codes=corp_codes, year_from=year_from, year_to=year_to)
+    retriever, flt = _retriever(stocks, year_from, year_to)
     hits = retriever.search(query, flt, limit)
     if not hits:
         typer.echo("결과 없음")
@@ -161,6 +165,36 @@ def search(
         typer.echo(f"    {c['url']}")
         body = c["body"].replace("\n", " ")
         typer.echo(f"    {body[:200]}{'…' if len(body) > 200 else ''}\n")
+
+
+@app.command()
+def ask(
+    question: str,
+    stocks: Annotated[list[str] | None, typer.Option("--stock", "-s", help="종목코드")] = None,
+    year_from: int | None = None,
+    year_to: int | None = None,
+):
+    """공시를 근거로 질문에 답하기 (출처 번호 포함)."""
+    from dartrag.answer import Answerer, LLMError, OllamaLLM
+
+    settings = get_settings()
+    retriever, flt = _retriever(stocks, year_from, year_to)
+    answerer = Answerer(retriever, OllamaLLM(settings.llm_model, settings.ollama_url))
+    try:
+        result = answerer.answer(question, flt)
+    except LLMError as e:
+        typer.echo(str(e), err=True)
+        raise typer.Exit(1) from None
+    typer.echo(result.text + "\n")
+    for c in result.citations:
+        chunk = c.hit.chunk
+        typer.echo(
+            f"[{c.number}] {chunk['corp_name']} {chunk['report_nm']} > "
+            f"{' > '.join(chunk['section_path'])}\n    {chunk['url']}"
+        )
+    for w in result.warnings:
+        typer.echo(f"주의: {w}", err=True)
+    typer.echo("\n※ 공시 정보 요약이며 투자 권유가 아닙니다.")
 
 
 if __name__ == "__main__":
