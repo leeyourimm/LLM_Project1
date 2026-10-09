@@ -108,7 +108,7 @@ def _checkable(q: Quantity) -> bool:
     return not (q.kind == "plain" and q.value < 100 and q.value == q.value.to_integral_value())
 
 
-def _matches(a: Quantity, s: Quantity) -> bool:
+def matches(a: Quantity, s: Quantity) -> bool:
     tol = max(a.tol, s.tol)
     if a.kind == "money":
         return s.kind in ("money", "plain") and abs(abs(a.value) - abs(s.value)) <= tol
@@ -129,7 +129,5 @@ def unverified_numbers(sentence: str, sources: list[tuple[str, str | None]]) -> 
         if unit:
             found += extract(body, unit)
     return [
-        q.text
-        for q in extract(sentence)
-        if _checkable(q) and not any(_matches(q, s) for s in found)
+        q.text for q in extract(sentence) if _checkable(q) and not any(matches(q, s) for s in found)
     ]

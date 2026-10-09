@@ -1,0 +1,34 @@
+{"id": "manual-001", "question": "삼성전자의 주요 사업 부문은 무엇이야?", "category": "text", "stocks": ["005930"], "expected_keywords": [], "expected_sources": [{"section": "사업의 개요"}], "note": "실데이터로 검토 필요"}
+{"id": "manual-002", "question": "삼성전자의 주요 제품과 서비스는?", "category": "text", "stocks": ["005930"], "expected_keywords": [], "expected_sources": [{"section": "주요 제품"}], "note": "실데이터로 검토 필요"}
+{"id": "manual-003", "question": "삼성전자의 2024년 연구개발 활동은?", "category": "text", "stocks": ["005930"], "expected_keywords": [], "expected_sources": [{"section": "연구개발"}], "note": "실데이터로 검토 필요"}
+{"id": "manual-004", "question": "삼성전자의 배당 정책은 어떻게 돼?", "category": "text", "stocks": ["005930"], "expected_keywords": [], "expected_sources": [{"section": "배당에 관한 사항"}], "note": "실데이터로 검토 필요"}
+{"id": "manual-005", "question": "삼성전자의 최대주주는 누구야?", "category": "text", "stocks": ["005930"], "expected_keywords": [], "expected_sources": [{"section": "최대주주"}], "note": "실데이터로 검토 필요"}
+{"id": "manual-006", "question": "삼성전자이 진행 중인 소송이나 우발부채가 있어?", "category": "text", "stocks": ["005930"], "expected_keywords": [], "expected_sources": [{"section": "우발부채"}], "note": "실데이터로 검토 필요"}
+{"id": "manual-007", "question": "SK하이닉스의 주요 사업 부문은 무엇이야?", "category": "text", "stocks": ["000660"], "expected_keywords": [], "expected_sources": [{"section": "사업의 개요"}], "note": "실데이터로 검토 필요"}
+{"id": "manual-008", "question": "SK하이닉스의 주요 제품과 서비스는?", "category": "text", "stocks": ["000660"], "expected_keywords": [], "expected_sources": [{"section": "주요 제품"}], "note": "실데이터로 검토 필요"}
+{"id": "manual-009", "question": "SK하이닉스의 2024년 연구개발 활동은?", "category": "text", "stocks": ["000660"], "expected_keywords": [], "expected_sources": [{"section": "연구개발"}], "note": "실데이터로 검토 필요"}
+{"id": "manual-010", "question": "SK하이닉스의 배당 정책은 어떻게 돼?", "category": "text", "stocks": ["000660"], "expected_keywords": [], "expected_sources": [{"section": "배당에 관한 사항"}], "note": "실데이터로 검토 필요"}
+{"id": "manual-011", "question": "SK하이닉스의 최대주주는 누구야?", "category": "text", "stocks": ["000660"], "expected_keywords": [], "expected_sources": [{"section": "최대주주"}], "note": "실데이터로 검토 필요"}
+{"id": "manual-012", "question": "SK하이닉스이 진행 중인 소송이나 우발부채가 있어?", "category": "text", "stocks": ["000660"], "expected_keywords": [], "expected_sources": [{"section": "우발부채"}], "note": "실데이터로 검토 필요"}
+{"id": "manual-013", "question": "현대차의 주요 사업 부문은 무엇이야?", "category": "text", "stocks": ["005380"], "expected_keywords": [], "expected_sources": [{"section": "사업의 개요"}], "note": "실데이터로 검토 필요"}
+{"id": "manual-014", "question": "현대차의 주요 제품과 서비스는?", "category": "text", "stocks": ["005380"], "expected_keywords": [], "expected_sources": [{"section": "주요 제품"}], "note": "실데이터로 검토 필요"}
+{"id": "manual-015", "question": "현대차의 2024년 연구개발 활동은?", "category": "text", "stocks": ["005380"], "expected_keywords": [], "expected_sources": [{"section": "연구개발"}], "note": "실데이터로 검토 필요"}
+{"id": "manual-016", "question": "현대차의 배당 정책은 어떻게 돼?", "category": "text", "stocks": ["005380"], "expected_keywords": [], "expected_sources": [{"section": "배당에 관한 사항"}], "note": "실데이터로 검토 필요"}
+{"id": "manual-017", "question": "현대차의 최대주주는 누구야?", "category": "text", "stocks": ["005380"], "expected_keywords": [], "expected_sources": [{"section": "최대주주"}], "note": "실데이터로 검토 필요"}
+{"id": "manual-018", "question": "현대차이 진행 중인 소송이나 우발부채가 있어?", "category": "text", "stocks": ["005380"], "expected_keywords": [], "expected_sources": [{"section": "우발부채"}], "note": "실데이터로 검토 필요"}
+{"id": "manual-019", "question": "NAVER의 주요 사업 부문은 무엇이야?", "category": "text", "stocks": ["035420"], "expected_keywords": [], "expected_sources": [{"section": "사업의 개요"}], "note": "실데이터로 검토 필요"}
+{"id": "manual-020", "question": "NAVER의 주요 제품과 서비스는?", "category": "text", "stocks": ["035420"], "expected_keywords": [], "expected_sources": [{"section": "주요 제품"}], "note": "실데이터로 검토 필요"}
+{"id": "manual-021", "question": "NAVER의 2024년 연구개발 활동은?", "category": "text", "stocks": ["035420"], "expected_keywords": [], "expected_sources": [{"section": "연구개발"}], "note": "실데이터로 검토 필요"}
+{"id": "manual-022", "question": "NAVER의 배당 정책은 어떻게 돼?", "category": "text", "stocks": ["035420"], "expected_keywords": [], "expected_sources": [{"section": "배당에 관한 사항"}], "note": "실데이터로 검토 필요"}
+{"id": "manual-023", "question": "NAVER의 최대주주는 누구야?", "category": "text", "stocks": ["035420"], "expected_keywords": [], "expected_sources": [{"section": "최대주주"}], "note": "실데이터로 검토 필요"}
+{"id": "manual-024", "question": "NAVER이 진행 중인 소송이나 우발부채가 있어?", "category": "text", "stocks": ["035420"], "expected_keywords": [], "expected_sources": [{"section": "우발부채"}], "note": "실데이터로 검토 필요"}
+{"id": "manual-025", "question": "KB금융의 주요 사업 부문은 무엇이야?", "category": "text", "stocks": ["105560"], "expected_keywords": [], "expected_sources": [{"section": "사업의 개요"}], "note": "실데이터로 검토 필요"}
+{"id": "manual-026", "question": "KB금융의 주요 제품과 서비스는?", "category": "text", "stocks": ["105560"], "expected_keywords": [], "expected_sources": [{"section": "주요 제품"}], "note": "실데이터로 검토 필요"}
+{"id": "manual-027", "question": "KB금융의 2024년 연구개발 활동은?", "category": "text", "stocks": ["105560"], "expected_keywords": [], "expected_sources": [{"section": "연구개발"}], "note": "실데이터로 검토 필요"}
+{"id": "manual-028", "question": "KB금융의 배당 정책은 어떻게 돼?", "category": "text", "stocks": ["105560"], "expected_keywords": [], "expected_sources": [{"section": "배당에 관한 사항"}], "note": "실데이터로 검토 필요"}
+{"id": "manual-029", "question": "KB금융의 최대주주는 누구야?", "category": "text", "stocks": ["105560"], "expected_keywords": [], "expected_sources": [{"section": "최대주주"}], "note": "실데이터로 검토 필요"}
+{"id": "manual-030", "question": "KB금융이 진행 중인 소송이나 우발부채가 있어?", "category": "text", "stocks": ["105560"], "expected_keywords": [], "expected_sources": [{"section": "우발부채"}], "note": "실데이터로 검토 필요"}
+{"id": "manual-031", "question": "삼성전자 주가가 내년에 오를까?", "category": "unanswerable", "stocks": ["005930"], "note": "투자 전망: 답하지 않아야 함"}
+{"id": "manual-032", "question": "삼성전자 지금 매수해도 돼?", "category": "unanswerable", "stocks": ["005930"], "note": "투자 권유: 답하지 않아야 함"}
+{"id": "manual-033", "question": "SK하이닉스 대표이사의 MBTI는?", "category": "unanswerable", "stocks": ["000660"], "note": "공시에 없는 사적 정보"}
+{"id": "manual-034", "question": "현대차의 2035년 예상 매출은?", "category": "unanswerable", "stocks": ["005380"], "note": "공시에 없는 미래 수치"}
