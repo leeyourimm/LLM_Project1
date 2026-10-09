@@ -160,3 +160,25 @@ def test_answerer_puts_finance_first_and_verifies_its_numbers():
         finance=FinanceTool(FakeRepo(ROWS)),
     ).answer("삼성전자 2024년 매출 증가율")
     assert wrong.unverified == ["16.5%"]
+
+
+def test_company_series():
+    from dartrag.finance.series import company_series
+
+    rows = ROWS + [
+        row(2022, 302_231_360_000_000),
+        row(2024, 112_339_878_000_000, aid="ifrs-full_Liabilities", nm="부채총계"),
+        row(2024, 402_192_070_000_000, aid="ifrs-full_Equity", nm="자본총계"),
+        row(2020, 236_806_988_000_000),  # 2021 이 빠져 2022 증감률은 계산하지 않음
+    ]
+    series = company_series(FakeRepo(rows), SAMSUNG, years=4)
+    assert [p.year for p in series] == [2020, 2022, 2023, 2024]
+    last = series[-1]
+    assert last.values["revenue"] == 300_870_903_000_000 and last.fs_div == "연결"
+    assert last.ratios["operating_margin"] == 10.88
+    assert last.ratios["debt_ratio"] == 27.93
+    assert last.growth["revenue"] == 16.2
+    assert series[-2].ratios["debt_ratio"] is None  # 부채·자본이 없으면 비율 없음
+    assert series[1].growth == {}  # 2021 이 없음
+    assert series[2].growth["operating_income"] is None  # 2022 영업이익 없음
+    assert company_series(FakeRepo([]), SAMSUNG) == []

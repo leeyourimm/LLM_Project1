@@ -51,6 +51,12 @@ class Repository:
         ).fetchall()
         return [r[0] for r in rows]
 
+    def company_by_stock(self, stock_code: str) -> tuple[str, str, str] | None:
+        return self.conn.execute(
+            "SELECT corp_code, corp_name, stock_code FROM companies WHERE stock_code = %s",
+            (stock_code,),
+        ).fetchone()
+
     def fiscal_end_month(self, corp_code: str) -> int:
         row = self.conn.execute(
             "SELECT fiscal_end_month FROM companies WHERE corp_code = %s", (corp_code,)

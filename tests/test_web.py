@@ -71,6 +71,22 @@ class FakeRepo:
         body = "환율 위험" if rcept_no == "old" else "환율 위험\n관세 위험"
         return [(f"{rcept_no}.xml", 0, ["위험관리"], body)]
 
+    def company_by_stock(self, stock):
+        return ("00126380", "삼성전자", "005930") if stock == "005930" else None
+
+    def financial_rows(self, corp_codes, reprt_code, sj_divs, account_ids, account_names):
+        from dartrag.finance import FinancialRow
+
+        data = {
+            "ifrs-full_Revenue": {2023: 258_935_494_000_000, 2024: 300_870_903_000_000},
+            "dart_OperatingIncomeLoss": {2023: 6_566_976_000_000, 2024: 32_725_961_000_000},
+        }
+        return [
+            FinancialRow("00126380", y, "CFS", aid, "x", amt, f"rcpt{y}")
+            for aid in account_ids
+            for y, amt in data.get(aid, {}).items()
+        ]
+
     def latest_filing_per_period(self, corp_code, kind):
         return ["old", "new"]
 
@@ -180,3 +196,20 @@ def test_diff(ctx):
     assert r["title"].startswith("삼성전자 변경점")
     assert r["sections"][0]["key"] == "위험관리" and r["sections"][0]["added"] == ["관세 위험"]
     assert client.get("/api/diff", params={"stock": "000000"}).status_code == 404
+
+
+def test_company_dashboard(ctx):
+    client, repo, _ = ctx
+    r = client.get("/api/company/005930").json()
+    assert r["corp_name"] == "삼성전자" and r["watched"] is False
+    assert [p["year"] for p in r["series"]] == [2023, 2024]
+    last = r["series"][-1]
+    assert last["values"]["revenue"] == 300_870_903_000_000
+    assert last["ratios"]["operating_margin"] == 10.88 and last["ratios"]["debt_ratio"] is None
+    assert last["growth"]["revenue"] == 16.2 and last["rcept_no"] == "rcpt2024"
+    assert r["disclosures"][0]["url"].endswith("rcpNo=20250311000001")
+    assert repo.feed_args[1:] == (1, ["00126380"])
+    client.post("/api/watchlist", json={"stock": "005930"})
+    assert client.get("/api/company/005930").json()["watched"] is True
+    assert client.get("/api/company/000000").status_code == 404
+    assert client.get("/api/company/abc").status_code == 422

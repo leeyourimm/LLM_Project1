@@ -3,11 +3,12 @@
 화면은 빌드 도구 없이 바로 열 수 있게 정적 HTML·JS 한 벌로 만들었다 (static/).
 """
 
+import pathlib
+from dataclasses import asdict
 from datetime import date, timedelta
-from pathlib import Path
 from typing import Annotated
 
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import FastAPI, HTTPException, Path, Query
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
@@ -15,7 +16,7 @@ from pydantic import BaseModel, Field
 from dartrag.search import SearchFilter
 from dartrag.web.services import Services
 
-STATIC = Path(__file__).parent / "static"
+STATIC = pathlib.Path(__file__).parent / "static"
 DISCLAIMER = "공시 정보 요약이며 투자 권유가 아닙니다. 중요한 판단은 원문을 확인하세요."
 
 
@@ -184,6 +185,35 @@ def create_app(services: Services) -> FastAPI:
                 }
                 for d in result.diffs
             ],
+        }
+
+    @app.get("/api/company/{stock}")
+    def company(
+        stock: Annotated[str, Path(pattern=r"^\d{6}$")],
+        years: Annotated[int, Query(ge=2, le=10)] = 5,
+        days: Annotated[int, Query(ge=1, le=365)] = 90,
+    ):
+        from dartrag.finance.series import company_series
+
+        with services.repo() as repo:
+            found = repo.company_by_stock(stock)
+            if found is None:
+                raise HTTPException(404, "해당 종목코드의 기업이 없습니다")
+            code, name, stock_code = found
+            series = company_series(repo, code, years)
+            disclosures = repo.recent_disclosures(date.today() - timedelta(days=days), 1, [code])
+            watched = any(c == code for c, *_ in repo.watchlist())
+        return {
+            "corp_code": code,
+            "corp_name": name,
+            "stock_code": stock_code,
+            "watched": watched,
+            "series": [asdict(p) for p in series],
+            "disclosures": [
+                d | {"url": f"https://dart.fss.or.kr/dsaf001/main.do?rcpNo={d['rcept_no']}"}
+                for d in disclosures[:30]
+            ],
+            "disclaimer": DISCLAIMER,
         }
 
     app.mount("/static", StaticFiles(directory=STATIC), name="static")

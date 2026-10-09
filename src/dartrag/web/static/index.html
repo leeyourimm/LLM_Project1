@@ -11,6 +11,7 @@
     <div class="brand">DART 공시 분석</div>
     <nav class="tabs" role="tablist">
       <button role="tab" data-tab="ask" aria-selected="true">질문하기</button>
+      <button role="tab" data-tab="company">회사</button>
       <button role="tab" data-tab="feed">공시 피드</button>
       <button role="tab" data-tab="watch">관심 종목</button>
       <button role="tab" data-tab="diff">변경점</button>
@@ -31,6 +32,14 @@
         </div>
       </form>
       <div id="ask-result" aria-live="polite"></div>
+    </section>
+
+    <section id="tab-company" class="panel" hidden>
+      <form id="company-form" class="card row">
+        <input id="company-stock" list="company-list" placeholder="회사 이름 또는 종목코드" required autocomplete="off">
+        <button type="submit" class="primary">보기</button>
+      </form>
+      <div id="company-result" aria-live="polite"></div>
     </section>
 
     <section id="tab-feed" class="panel" hidden>
@@ -73,7 +82,9 @@
 
   <datalist id="company-list"></datalist>
   <footer>공시 정보 요약이며 투자 권유가 아닙니다. 데이터 출처: 금융감독원 OpenDART</footer>
+  <div id="chart-tip" class="chart-tip" role="status" hidden></div>
   <template id="tpl-error"><div class="card error" role="alert"></div></template>
+  <script src="/static/chart.js"></script>
   <script src="/static/app.js"></script>
 </body>
 </html>

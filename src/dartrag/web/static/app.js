@@ -286,7 +286,210 @@ $("#diff-form").addEventListener("submit", async (e) => {
   }
 });
 
+// ---- 회사 대시보드 ----
+const KPI = [
+  { key: "revenue", label: "매출액", kind: "won" },
+  { key: "operating_income", label: "영업이익", kind: "won" },
+  { key: "net_income", label: "당기순이익", kind: "won" },
+  { key: "operating_margin", label: "영업이익률", kind: "ratio" },
+  { key: "debt_ratio", label: "부채비율", kind: "ratio" },
+];
+
+function arrow(v, unit) {
+  if (v === null || v === undefined) return "전년 비교 불가";
+  const sign = v > 0 ? "▲" : v < 0 ? "▼" : "–";
+  return `전년 대비 ${sign} ${Math.abs(v).toFixed(1)}${unit}`;
+}
+
+function kpiTiles(series) {
+  const cur = series[series.length - 1];
+  const prev = series.length > 1 && series[series.length - 2].year === cur.year - 1 ? series[series.length - 2] : null;
+  return el(
+    "div",
+    { class: "kpis" },
+    KPI.map((k) => {
+      let value;
+      let delta;
+      if (k.kind === "won") {
+        value = Chart.wonShort(cur.values[k.key]);
+        delta = arrow(cur.growth[k.key], "%");
+      } else {
+        const v = cur.ratios[k.key];
+        const p = prev ? prev.ratios[k.key] : null;
+        value = Chart.pct(v);
+        delta = arrow(v !== null && p !== null && p !== undefined ? v - p : null, "%p");
+      }
+      return el("div", { class: "kpi" }, el("div", { class: "label" }, `${k.label} (${cur.year})`), el("div", { class: "value" }, value), el("div", { class: "delta" }, delta));
+    })
+  );
+}
+
+function dataTable(series) {
+  const rows = [
+    ["매출액", (p) => Chart.wonShort(p.values.revenue)],
+    ["영업이익", (p) => Chart.wonShort(p.values.operating_income)],
+    ["당기순이익", (p) => Chart.wonShort(p.values.net_income)],
+    ["매출 증감률", (p) => Chart.pct(p.growth.revenue)],
+    ["영업이익률", (p) => Chart.pct(p.ratios.operating_margin)],
+    ["순이익률", (p) => Chart.pct(p.ratios.net_margin)],
+    ["부채비율", (p) => Chart.pct(p.ratios.debt_ratio)],
+    ["재무제표", (p) => p.fs_div || "-"],
+  ];
+  return el(
+    "div",
+    { class: "table-wrap" },
+    el(
+      "table",
+      { class: "data-table" },
+      el("thead", {}, el("tr", {}, el("th", {}, "항목"), series.map((p) => el("th", {}, String(p.year))))),
+      el("tbody", {}, rows.map(([label, f]) => el("tr", {}, el("th", { scope: "row" }, label), series.map((p) => el("td", {}, f(p))))))
+    )
+  );
+}
+
+let companyCharts = null;
+function drawCharts() {
+  if (!companyCharts) return;
+  const { series, money, margin } = companyCharts;
+  const categories = series.map((p) => String(p.year));
+  Chart.bars(money, {
+    label: "연도별 매출액, 영업이익, 당기순이익",
+    categories,
+    series: [
+      { label: "매출액", values: series.map((p) => p.values.revenue) },
+      { label: "영업이익", values: series.map((p) => p.values.operating_income) },
+      { label: "당기순이익", values: series.map((p) => p.values.net_income) },
+    ],
+  });
+  Chart.lines(margin, {
+    label: "연도별 영업이익률과 순이익률",
+    categories,
+    series: [
+      { label: "영업이익률", values: series.map((p) => p.ratios.operating_margin) },
+      { label: "순이익률", values: series.map((p) => p.ratios.net_margin) },
+    ],
+  });
+}
+let resizeTimer;
+window.addEventListener("resize", () => {
+  clearTimeout(resizeTimer);
+  resizeTimer = setTimeout(drawCharts, 150);
+});
+
+function disclosureItem(d) {
+  return el(
+    "li",
+    {},
+    el("span", { class: `badge imp-${d.importance}` }, IMP[d.importance]),
+    el(
+      "div",
+      { class: "grow" },
+      el("strong", {}, d.event_label),
+      d.correction ? " (정정)" : "",
+      el("div", { class: "muted" }, `${d.rcept_dt} · `, el("a", { href: d.url, target: "_blank", rel: "noopener" }, d.report_nm))
+    )
+  );
+}
+
+async function diffSummary(stock) {
+  const box = el("div", { class: "card" }, el("h3", {}, "최근 사업보고서 변경점"), el("div", { class: "muted" }, "비교하는 중…"));
+  api(`/api/diff?stock=${stock}`)
+    .then((r) => {
+      const changed = r.sections.filter((s) => s.status !== "changed" || s.added.length || s.removed.length || s.modified.length);
+      const important = changed.filter((s) => s.importance >= 2);
+      box.replaceChildren(
+        el("h3", {}, "최근 사업보고서 변경점"),
+        el("div", { class: "muted" }, `${r.old.report_nm} → ${r.new.report_nm}`),
+        el("p", {}, `내용이 바뀐 섹션 ${changed.length}곳`, important.length ? `, 그중 눈여겨볼 곳 ${important.length}곳` : ""),
+        important.length ? el("ul", {}, important.slice(0, 5).map((s) => el("li", {}, "⚠️ ", s.key))) : null,
+        el("button", { type: "button", onclick: () => { $("#diff-stock").value = stock; showTab("diff"); $("#diff-form").requestSubmit(); } }, "변경점 자세히 보기")
+      );
+    })
+    .catch((err) => {
+      box.replaceChildren(el("h3", {}, "최근 사업보고서 변경점"), el("div", { class: "muted" }, err.message));
+    });
+  return box;
+}
+
+async function loadCompany(stock) {
+  const out = $("#company-result");
+  out.replaceChildren(el("div", { class: "card spinner" }, "불러오는 중…"));
+  companyCharts = null;
+  try {
+    const r = await api(`/api/company/${stock}`);
+    history.replaceState(null, "", `#company/${stock}`);
+    const watchBtn = el("button", { type: "button" }, r.watched ? "관심 종목 해제" : "관심 종목에 추가");
+    let watched = r.watched;
+    watchBtn.addEventListener("click", async () => {
+      watchBtn.disabled = true;
+      try {
+        if (watched) await api(`/api/watchlist/${stock}`, { method: "DELETE" });
+        else await api("/api/watchlist", { method: "POST", body: JSON.stringify({ stock, min_importance: 2 }) });
+        watched = !watched;
+        watchBtn.textContent = watched ? "관심 종목 해제" : "관심 종목에 추가";
+      } catch (err) {
+        out.prepend(errorBox(err));
+      } finally {
+        watchBtn.disabled = false;
+      }
+    });
+    const head = el(
+      "div",
+      { class: "card company-head" },
+      el("h2", {}, r.corp_name, el("span", { class: "muted" }, ` ${r.stock_code}`)),
+      watchBtn
+    );
+    const parts = [head];
+    if (r.series.length) {
+      const latest = r.series[r.series.length - 1];
+      const money = el("div", { class: "chart-box" });
+      const margin = el("div", { class: "chart-box" });
+      parts.push(
+        kpiTiles(r.series),
+        el("div", { class: "card chart-card" }, el("h3", {}, "매출과 이익 (원)"), money,
+          el("details", {}, el("summary", {}, "표로 보기"), dataTable(r.series)),
+          el("p", { class: "muted" }, `사업보고서 기준, ${latest.fs_div || "연결"} 재무제표 우선 · `,
+            latest.rcept_no ? el("a", { href: `https://dart.fss.or.kr/dsaf001/main.do?rcpNo=${latest.rcept_no}`, target: "_blank", rel: "noopener" }, `${latest.year} 사업보고서 원문`) : "")),
+        el("div", { class: "card chart-card" }, el("h3", {}, "이익률 (%)"), margin)
+      );
+      companyCharts = { series: r.series, money, margin };
+    } else {
+      parts.push(el("div", { class: "card muted" }, "재무 데이터가 없습니다. dartrag collect 로 사업보고서 재무제표를 받아오세요."));
+    }
+    parts.push(
+      el(
+        "div",
+        { class: "card" },
+        el("h3", {}, "최근 90일 공시"),
+        r.disclosures.length
+          ? el("ul", { class: "list" }, r.disclosures.map(disclosureItem))
+          : el("div", { class: "muted" }, "최근 공시가 없습니다. dartrag feed poll 로 공시를 받아오세요.")
+      ),
+      await diffSummary(stock),
+      el("p", { class: "muted" }, r.disclaimer)
+    );
+    out.replaceChildren(...parts);
+    drawCharts();
+  } catch (err) {
+    out.replaceChildren(errorBox(err));
+  }
+}
+
+$("#company-form").addEventListener("submit", (e) => {
+  e.preventDefault();
+  const stock = toStock($("#company-stock").value);
+  if (!stock) {
+    $("#company-result").replaceChildren(errorBox(new Error("회사를 찾지 못했습니다. 목록에서 고르거나 종목코드를 입력하세요")));
+    return;
+  }
+  loadCompany(stock);
+});
+
 // ---- 시작 ----
 loadCompanies();
-const initial = location.hash.slice(1);
-showTab(["ask", "feed", "watch", "diff"].includes(initial) ? initial : "ask");
+const [initial, initialStock] = location.hash.slice(1).split("/");
+showTab(["ask", "company", "feed", "watch", "diff"].includes(initial) ? initial : "ask");
+if (initial === "company" && /^\d{6}$/.test(initialStock || "")) {
+  $("#company-stock").value = initialStock;
+  loadCompany(initialStock);
+}

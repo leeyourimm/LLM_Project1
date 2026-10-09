@@ -179,6 +179,8 @@ def test_financial_rows_match_by_id_or_name(repo):
         ]
     )
     assert repo.listed_companies() == [("00126380", "삼성전자")]
+    assert repo.company_by_stock("005930") == ("00126380", "삼성전자", "005930")
+    assert repo.company_by_stock("000000") is None
     repo.replace_financials(
         "00126380",
         2024,
