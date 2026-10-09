@@ -1,5 +1,5 @@
 from contextlib import contextmanager
-from datetime import date
+from datetime import UTC, date, datetime
 
 import pytest
 from fastapi.testclient import TestClient
@@ -28,6 +28,8 @@ HIT = SearchHit(
 class FakeRepo:
     def __init__(self):
         self.watch = {}
+        self.users = {}
+        self.sessions = {}
         self.closed = False
 
     def corp_codes_for_stocks(self, stocks):
@@ -50,14 +52,40 @@ class FakeRepo:
             }
         ]
 
-    def watchlist(self):
-        return [(c, "삼성전자", "005930", m) for c, m in self.watch.items()]
+    def watchlist(self, user_id=None):
+        return [(c, "삼성전자", "005930", m) for (u, c), m in self.watch.items() if u == user_id]
 
-    def set_watch(self, code, imp):
-        self.watch[code] = imp
+    def set_watch(self, code, imp, user_id=None):
+        self.watch[(user_id, code)] = imp
 
-    def remove_watch(self, code):
-        return self.watch.pop(code, None) is not None
+    def remove_watch(self, code, user_id=None):
+        return self.watch.pop((user_id, code), None) is not None
+
+    # 로그인
+    def create_user(self, email, password_hash):
+        if any(e == email for e, _ in self.users.values()):
+            return None
+        uid = len(self.users) + 1
+        self.users[uid] = (email, password_hash)
+        return uid
+
+    def user_by_email(self, email):
+        return next(((i, e, h) for i, (e, h) in self.users.items() if e == email), None)
+
+    def set_password(self, uid, password_hash):
+        self.users[uid] = (self.users[uid][0], password_hash)
+        self.sessions = {t: u for t, u in self.sessions.items() if u != uid}
+
+    def create_session(self, token_hash, uid, expires):
+        assert expires > datetime.now(UTC)
+        self.sessions[token_hash] = uid
+
+    def session_user(self, token_hash):
+        uid = self.sessions.get(token_hash)
+        return (uid, self.users[uid][0]) if uid else None
+
+    def delete_session(self, token_hash):
+        self.sessions.pop(token_hash, None)
 
     def filing_info(self, rcept_no):
         return {
@@ -213,3 +241,146 @@ def test_company_dashboard(ctx):
     assert client.get("/api/company/005930").json()["watched"] is True
     assert client.get("/api/company/000000").status_code == 404
     assert client.get("/api/company/abc").status_code == 422
+
+
+@pytest.fixture
+def secure():
+    from dartrag.web.auth import LoginLimiter
+
+    repo = FakeRepo()
+
+    @contextmanager
+    def repo_cm():
+        yield repo
+
+    services = Services(
+        repo_cm, lambda r: FakeAnswerer(), lambda r: FakeRetriever(), auth_required=True
+    )
+    return TestClient(create_app(services, LoginLimiter(max_failures=3))), repo, services
+
+
+PW = "correct horse battery"
+
+
+def test_local_mode_needs_no_login(ctx):
+    client, *_ = ctx
+    assert client.get("/api/auth/me").json() == {
+        "auth_required": False,
+        "allow_signup": True,
+        "user": None,
+    }
+    assert client.get("/api/companies").status_code == 200
+    r = client.post("/api/auth/signup", json={"email": "a@b.co", "password": PW})
+    assert r.status_code == 400
+
+
+def test_signup_login_logout(secure):
+    client, repo, _ = secure
+    assert client.get("/api/companies").status_code == 401
+    assert client.post("/api/ask", json={"question": "매출은?"}).status_code == 401
+    assert client.get("/api/health").status_code == 200
+    assert client.get("/").status_code == 200
+
+    bad = client.post("/api/auth/signup", json={"email": "nope", "password": PW})
+    assert bad.status_code == 422 and "이메일" in bad.json()["detail"]
+    short = client.post("/api/auth/signup", json={"email": "a@b.co", "password": "short"})
+    assert short.status_code == 422 and "10자" in short.json()["detail"]
+
+    r = client.post("/api/auth/signup", json={"email": " A@B.co ", "password": PW})
+    assert r.status_code == 201 and r.json()["user"]["email"] == "a@b.co"
+    cookie = r.headers["set-cookie"]
+    assert "HttpOnly" in cookie and "SameSite=lax" in cookie and "Secure" not in cookie
+    assert PW not in str(repo.users) and "scrypt$" in repo.users[1][1]
+    # DB 에는 토큰 원문이 아니라 해시만
+    assert client.cookies.get("dartrag_session") not in repo.sessions
+    assert client.get("/api/auth/me").json()["user"] == {"email": "a@b.co"}
+    assert client.get("/api/companies").status_code == 200
+
+    dup = client.post("/api/auth/signup", json={"email": "a@b.co", "password": PW})
+    assert dup.status_code == 409
+
+    client.post("/api/auth/logout")
+    assert repo.sessions == {}
+    assert client.get("/api/companies").status_code == 401
+
+    wrong = client.post("/api/auth/login", json={"email": "a@b.co", "password": "x" * 12})
+    assert wrong.status_code == 401
+    ghost = client.post("/api/auth/login", json={"email": "z@b.co", "password": PW})
+    assert ghost.json()["detail"] == wrong.json()["detail"]  # 가입 여부를 드러내지 않음
+    assert client.post("/api/auth/login", json={"email": "A@b.co", "password": PW}).is_success
+    assert client.get("/api/companies").status_code == 200
+
+
+def test_login_rate_limit(secure):
+    client, *_ = secure
+    client.post("/api/auth/signup", json={"email": "a@b.co", "password": PW})
+    client.post("/api/auth/logout")
+    for _ in range(3):
+        client.post("/api/auth/login", json={"email": "a@b.co", "password": "wrong-password"})
+    r = client.post("/api/auth/login", json={"email": "a@b.co", "password": PW})
+    assert r.status_code == 429  # 맞는 비밀번호여도 잠시 막힘
+
+
+def test_watchlist_is_per_user(secure):
+    client, repo, _ = secure
+    client.post("/api/auth/signup", json={"email": "a@b.co", "password": PW})
+    client.post("/api/watchlist", json={"stock": "005930"})
+    assert len(client.get("/api/watchlist").json()) == 1
+    assert client.get("/api/company/005930").json()["watched"] is True
+
+    other = TestClient(client.app)
+    other.post("/api/auth/signup", json={"email": "c@d.co", "password": PW})
+    assert other.get("/api/watchlist").json() == []
+    assert other.get("/api/company/005930").json()["watched"] is False
+    assert repo.watchlist(None) == []  # 운영자 알림 목록과는 별개
+
+
+def test_password_change_and_disabled_signup(secure):
+    client, repo, services = secure
+    client.post("/api/auth/signup", json={"email": "a@b.co", "password": PW})
+    other = TestClient(client.app)
+    other.post("/api/auth/login", json={"email": "a@b.co", "password": PW})
+    r = client.post("/api/auth/password", json={"current": "nope-nope-nope", "new": "x" * 12})
+    assert r.status_code == 401
+    r = client.post("/api/auth/password", json={"current": PW, "new": "new password 123"})
+    assert r.status_code == 200
+    assert other.get("/api/companies").status_code == 401  # 다른 기기 로그인은 끊김
+    assert client.get("/api/companies").status_code == 200
+
+    services.allow_signup = False
+    r = TestClient(client.app).post("/api/auth/signup", json={"email": "e@f.co", "password": PW})
+    assert r.status_code == 403
+
+
+def test_security_headers_and_cross_site_block(ctx):
+    client, *_ = ctx
+    page = client.get("/")
+    assert page.headers["x-frame-options"] == "DENY"
+    assert "script-src 'self'" in page.headers["content-security-policy"]
+    assert "content-security-policy" not in client.get("/api/docs").headers
+    r = client.post(
+        "/api/watchlist", json={"stock": "005930"}, headers={"Origin": "https://evil.example"}
+    )
+    assert r.status_code == 403
+    same = client.post(
+        "/api/watchlist", json={"stock": "005930"}, headers={"Origin": "http://testserver"}
+    )
+    assert same.status_code == 201
+
+
+def test_password_hashing():
+    from dartrag.web import auth
+
+    h = auth.hash_password(PW)
+    assert h != auth.hash_password(PW)  # 소금이 달라 매번 다름
+    assert auth.verify_password(PW, h) and not auth.verify_password(PW + "!", h)
+    assert not auth.verify_password(PW, "garbage") and not auth.verify_password(PW, "md5$x")
+
+    now = [0.0]
+    lim = auth.LoginLimiter(max_failures=2, window=60, clock=lambda: now[0])
+    lim.failed("1.1.1.1", "a")
+    assert not lim.blocked("1.1.1.1", "a")
+    lim.failed("1.1.1.1", "a")
+    assert lim.blocked("1.1.1.1", "a") and not lim.blocked("2.2.2.2", "b")
+    now[0] = 61
+    assert not lim.blocked("1.1.1.1", "a")
