@@ -17,6 +17,10 @@ class Settings(BaseSettings):
     s3_endpoint_url: str | None = None
     s3_bucket: str = "dart-raw"
 
+    qdrant_url: str = "http://localhost:6333"
+    opensearch_url: str = "http://localhost:9200"
+    embed_model: str = "BAAI/bge-m3"
+
 
 @lru_cache
 def get_settings() -> Settings:
