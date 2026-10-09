@@ -541,7 +541,9 @@ class Repository:
         self.conn.commit()
 
     def pending_alerts(self, channel: str) -> list[dict]:
-        """관심 종목의 기준 이상 공시 중 이 채널로 아직 안 보낸 것."""
+        """관심 종목의 기준 이상 공시 중 이 채널로 아직 안 보낸 것.
+
+        정기보고서는 변경점 요약을 붙이려고 처리가 끝날 때까지(최대 2시간) 기다린다."""
         cur = self.conn.execute(
             """
             SELECT d.rcept_no, d.corp_name, d.report_nm, d.rcept_dt, d.event_label,
@@ -549,6 +551,8 @@ class Repository:
             FROM disclosures d
             JOIN watchlist w ON w.corp_code = d.corp_code AND d.importance >= w.min_importance
             WHERE d.seen_at >= w.added_at
+              AND NOT (d.pblntf_ty = 'A' AND d.ingested_at IS NULL AND d.ingest_attempts < 5
+                       AND d.seen_at > now() - interval '2 hours')
               AND NOT EXISTS (SELECT 1 FROM notifications n
                               WHERE n.rcept_no = d.rcept_no AND n.channel = %s)
             ORDER BY d.rcept_dt, d.rcept_no
@@ -811,6 +815,9 @@ class Repository:
             WHERE ch.enabled AND ch.verified_at IS NOT NULL AND ch.target IS NOT NULL
               AND d.seen_at >= w.added_at AND d.seen_at >= ch.verified_at - interval '1 day'
               AND d.seen_at >= now() - make_interval(days => %s)
+              -- 정기보고서는 처리(변경점 요약)가 끝나면 보낸다. 2시간이 지나면 그냥 보낸다
+              AND NOT (d.pblntf_ty = 'A' AND d.ingested_at IS NULL AND d.ingest_attempts < 5
+                       AND d.seen_at > now() - interval '2 hours')
               AND NOT EXISTS (SELECT 1 FROM user_notifications n
                               WHERE n.user_id = ch.user_id AND n.rcept_no = d.rcept_no
                                 AND n.channel = ch.kind)
@@ -829,3 +836,208 @@ class Repository:
                 [(user_id, r, channel) for r in rcept_nos],
             )
         self.conn.commit()
+
+    # --- 새 정기보고서 처리 대기열 ---------------------------------------
+
+    def periodic_to_ingest(self, limit: int = 20, max_attempts: int = 5) -> list[dict]:
+        """피드로 받은 정기보고서 중 아직 처리하지 않은 것 (우리 DB 의 상장사만)."""
+        cur = self.conn.execute(
+            """SELECT d.rcept_no, d.corp_code, d.corp_name, d.report_nm, d.rcept_dt,
+                      d.ingest_attempts
+               FROM disclosures d JOIN companies c USING (corp_code)
+               WHERE d.pblntf_ty = 'A' AND d.ingested_at IS NULL AND d.ingest_attempts < %s
+               ORDER BY d.seen_at, d.rcept_no LIMIT %s""",
+            (max_attempts, limit),
+        )
+        cols = [c.name for c in cur.description]
+        return [dict(zip(cols, r, strict=True)) for r in cur.fetchall()]
+
+    def mark_ingested(self, rcept_no: str) -> None:
+        self.conn.execute(
+            """UPDATE disclosures SET ingested_at = now(), ingest_error = NULL,
+                 ingest_attempts = ingest_attempts + 1 WHERE rcept_no = %s""",
+            (rcept_no,),
+        )
+        self.conn.commit()
+
+    def mark_ingest_failed(self, rcept_no: str, error: str) -> None:
+        self.conn.execute(
+            """UPDATE disclosures SET ingest_error = %s, ingest_attempts = ingest_attempts + 1
+               WHERE rcept_no = %s""",
+            (error[:500], rcept_no),
+        )
+        self.conn.commit()
+
+    def ingest_backlog(self) -> dict:
+        row = self.conn.execute(
+            """SELECT count(*) FILTER (WHERE ingested_at IS NULL AND ingest_attempts < 5),
+                      count(*) FILTER (WHERE ingested_at IS NULL AND ingest_attempts >= 5),
+                      min(seen_at) FILTER (WHERE ingested_at IS NULL AND ingest_attempts < 5)
+               FROM disclosures JOIN companies USING (corp_code) WHERE pblntf_ty = 'A'"""
+        ).fetchone()
+        return {"pending": row[0], "failed": row[1], "oldest_pending": row[2]}
+
+    # --- 과거 데이터 채우기 ----------------------------------------------
+
+    def plan_backfill(self, start_year: int, end_year: int) -> int:
+        """아직 계획에 없는 상장사를 대기 상태로 넣는다. 이미 있는 회사는 기간만 넓힌다."""
+        cur = self.conn.execute(
+            """INSERT INTO backfill_state (corp_code, start_year, end_year)
+               SELECT corp_code, %s, %s FROM companies WHERE stock_code IS NOT NULL
+               ON CONFLICT (corp_code) DO UPDATE SET
+                 start_year = LEAST(backfill_state.start_year, EXCLUDED.start_year),
+                 end_year = GREATEST(backfill_state.end_year, EXCLUDED.end_year),
+                 status = CASE WHEN EXCLUDED.start_year < backfill_state.start_year
+                                 OR EXCLUDED.end_year > backfill_state.end_year
+                               THEN 'pending' ELSE backfill_state.status END
+               RETURNING (xmax = 0)""",
+            (start_year, end_year),
+        )
+        added = sum(1 for (inserted,) in cur.fetchall() if inserted)
+        self.conn.commit()
+        return added
+
+    def next_backfill(self, limit: int, max_attempts: int = 3) -> list[tuple[str, int, int]]:
+        return self.conn.execute(
+            """SELECT corp_code, start_year, end_year FROM backfill_state
+               WHERE status = 'pending' OR (status = 'error' AND attempts < %s)
+               ORDER BY attempts, corp_code LIMIT %s""",
+            (max_attempts, limit),
+        ).fetchall()
+
+    def finish_backfill(self, corp_code: str, filings: int) -> None:
+        self.conn.execute(
+            """UPDATE backfill_state SET status = 'done', filings = %s, last_error = NULL,
+                 attempts = attempts + 1, updated_at = now() WHERE corp_code = %s""",
+            (filings, corp_code),
+        )
+        self.conn.commit()
+
+    def fail_backfill(self, corp_code: str, error: str) -> None:
+        self.conn.execute(
+            """UPDATE backfill_state SET status = 'error', last_error = %s,
+                 attempts = attempts + 1, updated_at = now() WHERE corp_code = %s""",
+            (error[:500], corp_code),
+        )
+        self.conn.commit()
+
+    def backfill_progress(self) -> dict[str, int]:
+        rows = self.conn.execute(
+            "SELECT status, count(*) FROM backfill_state GROUP BY status"
+        ).fetchall()
+        return {"pending": 0, "done": 0, "error": 0} | dict(rows)
+
+    # --- 작업 실행 기록 --------------------------------------------------
+
+    def start_job(self, name: str) -> int:
+        row = self.conn.execute(
+            "INSERT INTO job_runs (name) VALUES (%s) RETURNING id", (name,)
+        ).fetchone()
+        self.conn.commit()
+        return row[0]
+
+    def finish_job(self, job_id: int, status: str, detail: dict | None = None) -> None:
+        import json
+
+        from psycopg.types.json import Jsonb
+
+        data = Jsonb(json.loads(json.dumps(detail or {}, default=str)))
+        self.conn.execute(
+            "UPDATE job_runs SET status = %s, detail = %s, finished_at = now() WHERE id = %s",
+            (status, data, job_id),
+        )
+        self.conn.commit()
+
+    def recent_jobs(self, limit: int = 50) -> list[dict]:
+        cur = self.conn.execute(
+            """SELECT id, name, status, started_at, finished_at, detail FROM job_runs
+               ORDER BY started_at DESC LIMIT %s""",
+            (limit,),
+        )
+        cols = [c.name for c in cur.description]
+        return [dict(zip(cols, r, strict=True)) for r in cur.fetchall()]
+
+    def last_job_runs(self) -> dict[str, dict]:
+        """작업 이름별 마지막 실행과 마지막 성공 시각 (상태 점검용)."""
+        cur = self.conn.execute(
+            """SELECT name,
+                      max(started_at) AS last_started,
+                      max(finished_at) FILTER (WHERE status = 'ok') AS last_ok,
+                      (array_agg(status ORDER BY started_at DESC))[1] AS last_status
+               FROM job_runs GROUP BY name"""
+        )
+        cols = [c.name for c in cur.description]
+        return {r[0]: dict(zip(cols[1:], r[1:], strict=True)) for r in cur.fetchall()}
+
+    def purge_job_runs(self, older_than_days: int) -> int:
+        cur = self.conn.execute(
+            "DELETE FROM job_runs WHERE started_at < now() - make_interval(days => %s)",
+            (older_than_days,),
+        )
+        self.conn.commit()
+        return cur.rowcount
+
+    # --- 데이터 검증 ------------------------------------------------------
+
+    def replace_issues(self, corp_code: str, issues) -> None:
+        """검증 결과 교체. 해결된 문제는 지우고 계속되는 문제는 처음 본 시각을 지킨다."""
+        with self.conn.transaction(), self.conn.cursor() as cur:
+            first_seen = {
+                tuple(r[:4]): r[4]
+                for r in cur.execute(
+                    """SELECT bsns_year, reprt_code, fs_div, rule, first_seen
+                       FROM data_issues WHERE corp_code = %s""",
+                    (corp_code,),
+                ).fetchall()
+            }
+            cur.execute("DELETE FROM data_issues WHERE corp_code = %s", (corp_code,))
+            cur.executemany(
+                """INSERT INTO data_issues (corp_code, bsns_year, reprt_code, fs_div, rule,
+                     severity, detail, first_seen)
+                   VALUES (%s, %s, %s, %s, %s, %s, %s, COALESCE(%s, now()))""",
+                [
+                    (
+                        corp_code,
+                        i.bsns_year,
+                        i.reprt_code,
+                        i.fs_div,
+                        i.rule,
+                        i.severity,
+                        i.detail,
+                        first_seen.get((i.bsns_year, i.reprt_code, i.fs_div, i.rule)),
+                    )
+                    for i in issues
+                ],
+            )
+
+    def data_issues(self, corp_code: str | None = None, severity: str | None = None) -> list[dict]:
+        query = """SELECT i.corp_code, c.corp_name, i.bsns_year, i.reprt_code, i.fs_div,
+                          i.rule, i.severity, i.detail, i.first_seen, i.last_seen
+                   FROM data_issues i LEFT JOIN companies c USING (corp_code) WHERE true"""
+        params: list = []
+        if corp_code:
+            query += " AND i.corp_code = %s"
+            params.append(corp_code)
+        if severity:
+            query += " AND i.severity = %s"
+            params.append(severity)
+        cur = self.conn.execute(
+            query + " ORDER BY i.severity, i.corp_code, i.bsns_year DESC", params
+        )
+        cols = [c.name for c in cur.description]
+        return [dict(zip(cols, r, strict=True)) for r in cur.fetchall()]
+
+    # --- 보관 기간 정리 ---------------------------------------------------
+
+    def purge_expired_sessions(self) -> int:
+        cur = self.conn.execute("DELETE FROM sessions WHERE expires_at < now()")
+        self.conn.commit()
+        return cur.rowcount
+
+    def purge_user_notifications(self, older_than_days: int) -> int:
+        cur = self.conn.execute(
+            "DELETE FROM user_notifications WHERE sent_at < now() - make_interval(days => %s)",
+            (older_than_days,),
+        )
+        self.conn.commit()
+        return cur.rowcount

@@ -566,6 +566,12 @@ async function loadCompany(stock) {
       const margin = el("div", { class: "chart-box" });
       parts.push(
         kpiTiles(r.series),
+        r.issues && r.issues.length
+          ? el("div", { class: "warn" },
+              el("strong", {}, "데이터 확인 필요 "),
+              el("ul", {}, r.issues.slice(0, 5).map((i) => el("li", {}, `${i.bsns_year} ${i.fs_div === "CFS" ? "연결" : "별도"} · ${i.detail}`))),
+              el("span", { class: "muted" }, "수집한 재무 수치가 검증 규칙에 걸렸습니다. 원문 공시와 비교해 보세요."))
+          : "",
         el("div", { class: "card chart-card" }, el("h3", {}, "매출과 이익 (원)"), money,
           el("details", {}, el("summary", {}, "표로 보기"), dataTable(r.series)),
           el("p", { class: "muted" }, `사업보고서 기준, ${latest.fs_div || "연결"} 재무제표 우선 · `,

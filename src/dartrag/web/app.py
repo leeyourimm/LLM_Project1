@@ -314,6 +314,7 @@ def create_app(services: Services, limiter: auth.LoginLimiter | None = None) -> 
             series = company_series(repo, code, years)
             disclosures = repo.recent_disclosures(date.today() - timedelta(days=days), 1, [code])
             watched = any(c == code for c, *_ in repo.watchlist(uid(user)))
+            issues = repo.data_issues(code)
         return {
             "corp_code": code,
             "corp_name": name,
@@ -323,6 +324,14 @@ def create_app(services: Services, limiter: auth.LoginLimiter | None = None) -> 
             "disclosures": [
                 d | {"url": f"https://dart.fss.or.kr/dsaf001/main.do?rcpNo={d['rcept_no']}"}
                 for d in disclosures[:30]
+            ],
+            # 재무 데이터 검증에 걸린 항목: 화면에 "확인 필요"로 보여 준다
+            "issues": [
+                {
+                    k: i[k]
+                    for k in ("bsns_year", "reprt_code", "fs_div", "rule", "severity", "detail")
+                }
+                for i in issues
             ],
             "disclaimer": DISCLAIMER,
         }

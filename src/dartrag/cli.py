@@ -416,6 +416,89 @@ def telegram_webhook():
     typer.echo("웹훅을 등록했습니다.")
 
 
+jobs_app = typer.Typer(help="백그라운드 작업 (보통은 Celery 작업자가 자동으로 실행)")
+app.add_typer(jobs_app, name="jobs")
+JOB_NAMES = ("feed_poll", "ingest", "process", "send_alerts", "backfill", "validate", "maintenance")
+
+
+@jobs_app.command("run")
+def jobs_run(
+    name: Annotated[str, typer.Argument(help=" / ".join(JOB_NAMES))],
+    stocks: Annotated[list[str] | None, typer.Option("--stock", "-s", help="process 대상")] = None,
+):
+    """작업 하나를 지금 바로 실행 (Celery 없이)."""
+    import json
+
+    from dartrag.worker import jobs
+
+    if name not in JOB_NAMES:
+        typer.echo(f"작업 이름은 {', '.join(JOB_NAMES)} 중 하나입니다.", err=True)
+        raise typer.Exit(1)
+    logging.basicConfig(level=logging.INFO)
+    logging.getLogger("httpx").setLevel(logging.WARNING)
+    settings = get_settings()
+    ctx = jobs.Context.from_settings(settings)
+    kwargs = {}
+    if name == "process" and stocks:
+        with ctx.repo() as repo:
+            kwargs["corp_codes"] = repo.corp_codes_for_stocks(stocks)
+    try:
+        result = jobs.run_job(ctx, name, lambda c, r: getattr(jobs, name)(c, r, **kwargs))
+    except jobs.JobSkipped:
+        typer.echo(f"{name} 이(가) 이미 실행 중입니다.", err=True)
+        raise typer.Exit(1) from None
+    typer.echo(json.dumps(result, ensure_ascii=False, indent=2, default=str))
+
+
+@jobs_app.command("status")
+def jobs_status():
+    """작업별 마지막 실행, 처리 대기 중인 보고서, 과거 데이터 진행률, 오늘 쓴 OpenDART 호출 수."""
+    from dartrag.worker import jobs
+
+    settings = get_settings()
+    ctx = jobs.Context.from_settings(settings)
+    with ctx.repo() as repo:
+        runs = repo.last_job_runs()
+        backlog = repo.ingest_backlog()
+        progress = repo.backfill_progress()
+    for name in JOB_NAMES:
+        r = runs.get(name)
+        if r is None:
+            typer.echo(f"{name:12} 실행 기록 없음")
+            continue
+        last_ok = f"{r['last_ok']:%m-%d %H:%M}" if r["last_ok"] else "-"
+        typer.echo(
+            f"{name:12} 마지막 {r['last_started']:%m-%d %H:%M} ({r['last_status']})"
+            f" · 마지막 성공 {last_ok}"
+        )
+    typer.echo(f"\n새 정기보고서 처리 대기 {backlog['pending']}건, 멈춘 것 {backlog['failed']}건")
+    total = sum(progress.values())
+    if total:
+        typer.echo(f"과거 데이터: {progress['done']}/{total}곳 완료, 오류 {progress['error']}곳")
+    quota = ctx.quota()
+    if quota is not None:
+        typer.echo(f"오늘 OpenDART 호출: {quota.used():,}/{quota.limit:,}회")
+
+
+@app.command()
+def validate(
+    stocks: Annotated[list[str] | None, typer.Option("--stock", "-s", help="종목코드")] = None,
+):
+    """재무 데이터 검증 (자산 = 부채 + 자본, 급변, 누락, 단위)."""
+    from dartrag.finance.validate import run_validation
+
+    repo = Repository.connect(get_settings().database_url)
+    codes = repo.corp_codes_for_stocks(stocks) if stocks else None
+    counts = run_validation(repo, codes)
+    typer.echo(f"{counts['companies']}곳 검사: 오류 {counts['error']}건, 경고 {counts['warn']}건")
+    for i in [r for c in (codes or [None]) for r in repo.data_issues(c)][:50]:
+        mark = "✗" if i["severity"] == "error" else "!"
+        typer.echo(
+            f"{mark} {i['corp_name'] or i['corp_code']} {i['bsns_year']} {i['reprt_code']}"
+            f" {i['fs_div']} [{i['rule']}] {i['detail']}"
+        )
+
+
 alert_app = typer.Typer(help="알림 채널 점검")
 app.add_typer(alert_app, name="alert")
 
