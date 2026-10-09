@@ -4,6 +4,7 @@ from typing import Annotated
 
 import typer
 
+from dartrag.bench import SLO_FIRST_TOKEN_S, SLO_TOTAL_P95_S
 from dartrag.config import get_settings
 from dartrag.dart import DartApiError, OpenDartClient
 from dartrag.db import Repository
@@ -744,6 +745,85 @@ def doctor(offline: bool = False):
         return
     typer.echo("\n❌ 표시를 위에서부터 고친 뒤 dartrag doctor 를 다시 실행하세요.", err=True)
     raise typer.Exit(1)
+
+
+@app.command()
+def bench(
+    url: Annotated[str, typer.Option(help="잴 API 서버 주소")] = "http://127.0.0.1:8000",
+    files: Annotated[
+        list[Path] | None,
+        typer.Option("--file", "-f", help="질문을 읽을 평가 문항 파일 (기본 eval/manual.jsonl)"),
+    ] = None,
+    questions: Annotated[
+        list[str] | None, typer.Option("--question", "-q", help="파일 대신 직접 넣을 질문")
+    ] = None,
+    stocks: Annotated[
+        list[str] | None, typer.Option("--stock", "-s", help="-q 질문의 종목코드")
+    ] = None,
+    category: Annotated[
+        list[str] | None,
+        typer.Option(help="이 종류의 문항만 (numeric, text, unanswerable, adversarial)"),
+    ] = None,
+    requests: Annotated[int, typer.Option("--requests", "-n", help="보낼 질문 수")] = 20,
+    concurrency: Annotated[
+        int, typer.Option("--concurrency", "-c", help="동시에 보낼 질문 수")
+    ] = 1,
+    timeout: Annotated[float, typer.Option(help="질문 하나를 기다리는 최대 시간(초)")] = 120,
+    slo_first_token: Annotated[float, typer.Option(help="첫 글자 기준(초)")] = SLO_FIRST_TOKEN_S,
+    slo_total_p95: Annotated[float, typer.Option(help="전체 응답 p95 기준(초)")] = SLO_TOTAL_P95_S,
+    out: Annotated[Path | None, typer.Option(help="질문별 결과를 JSON 으로 저장")] = None,
+    gate: Annotated[
+        bool, typer.Option(help="기준을 넘거나 실패한 질문이 있으면 실패로 끝냄")
+    ] = False,
+):
+    """실행 중인 API 에 질문을 보내 첫 글자·전체 응답 시간을 재고 SLO 와 비교."""
+    from dartrag.bench import Question, format_report, load_questions, run_bench, summarize, to_json
+
+    if questions:
+        qs = [Question(q, list(stocks or [])) for q in questions]
+    else:
+        paths = files or [Path("eval/manual.jsonl")]
+        try:
+            qs = load_questions(paths, category)
+        except (OSError, ValueError) as e:
+            typer.echo(f"질문 파일을 읽지 못했습니다: {e}", err=True)
+            raise typer.Exit(1) from None
+    if not qs:
+        typer.echo("보낼 질문이 없습니다. --file 이나 --question 을 확인하세요.", err=True)
+        raise typer.Exit(1)
+    if requests < 1 or concurrency < 1:
+        typer.echo("-n 과 -c 는 1 이상이어야 합니다.", err=True)
+        raise typer.Exit(1)
+
+    logging.getLogger("httpx").setLevel(logging.WARNING)
+    typer.echo(f"{url} 에 질문 {requests}개를 {concurrency}개씩 보냅니다 (질문 {len(qs)}종)")
+
+    def progress(i, r):
+        if r.ok:
+            mark = f"첫 글자 {r.first_token_s:.2f}초, 전체 {r.total_s:.2f}초"
+        else:
+            mark = f"실패: {r.error}"
+        typer.echo(f"[{i}/{requests}] {mark} | {r.question.text[:40]}")
+
+    results, elapsed = run_bench(
+        url, qs, requests=requests, concurrency=concurrency, timeout=timeout, on_result=progress
+    )
+    summary = summarize(
+        results,
+        elapsed,
+        slo_first_token=slo_first_token,
+        slo_total_p95=slo_total_p95,
+        concurrency=concurrency,
+    )
+    typer.echo("\n" + format_report(summary))
+    if out:
+        out.parent.mkdir(parents=True, exist_ok=True)
+        out.write_text(to_json(results, summary) + "\n", "utf-8")
+        typer.echo(f"\n질문별 결과 → {out}")
+    if not summary["ok"]:
+        raise typer.Exit(1)
+    if gate and (summary["errors"] or not all(summary["passed"].values())):
+        raise typer.Exit(1)
 
 
 def _step(name: str, fn, *args, **kwargs) -> tuple[str, int, float]:
