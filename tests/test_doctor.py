@@ -163,3 +163,25 @@ def test_security_problems_only_for_public_servers():
         Settings(_env_file=None, environment="production", auth_required=False)
     )
     assert any("AUTH_REQUIRED" in p for p in open_prod)
+
+
+@respx.mock
+def test_llm_fallback_check():
+    tags = respx.get("http://localhost:11434/api/tags")
+    with httpx.Client() as http:
+        c = doctor.check_llm_fallback(S, http)
+        assert c.ok and not c.required and "사용 안 함" in c.detail
+        backup = Settings(_env_file=None, llm_fallback_model="qwen3:1.7b")
+        tags.mock(return_value=httpx.Response(200, json={"models": [{"name": "qwen3:8b"}]}))
+        c = doctor.check_llm_fallback(backup, http)
+        assert not c.ok and not c.required and c.fix == "ollama pull qwen3:1.7b"
+        tags.mock(return_value=httpx.Response(200, json={"models": [{"name": "qwen3:1.7b"}]}))
+        c = doctor.check_llm_fallback(backup, http)
+        assert c.ok and "30초" in c.detail
+        same = Settings(_env_file=None, llm_fallback_model="qwen3:8b")
+        assert "같아" in doctor.check_llm_fallback(same, http).detail
+        tags.mock(side_effect=httpx.ConnectError("x"))
+        c = doctor.check_llm_fallback(backup, http)
+        assert not c.ok and not c.required
+    # 대체 모델이 없거나 받지 않았어도 준비 완료로 본다
+    assert all_ok([Check("Ollama 대체 모델", False, required=False)])

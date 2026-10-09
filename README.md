@@ -93,6 +93,57 @@ ollama pull qwen3:8b
 dartrag ask "2024년 HBM 매출 비중은?" -s 005930
 ```
 
+## 답변 속도 재기 (dartrag bench)
+설계 기준([docs/design.md](docs/design.md) 10절)은 **첫 글자 2초 이내, 전체 답변 p95 8초 이내**입니다. `dartrag bench`는 켜 둔 서버의 스트리밍 답변(`/api/ask/stream`)에 질문을 보내 두 시간을 재고 기준과 비교합니다. 돈이 드는 외부 서비스는 쓰지 않습니다.
+- 첫 글자: 질문을 보낸 뒤 답의 첫 글자가 올 때까지 (검색 시간 포함)
+- 전체: 답이 끝날 때까지
+
+1. 터미널 하나에서 서버를 켭니다. 잴 때는 요청 한도와 답변 캐시를 끕니다. 요청 한도를 켜 두면 1분에 7번째 질문부터 막히고, 캐시를 켜 두면 같은 질문은 모델을 거치지 않아 실제보다 빨라 보입니다.
+```bash
+RATE_ASK_PER_MINUTE=0 RATE_ASK_PER_DAY=0 ANSWER_CACHE=false dartrag serve
+```
+2. 터미널을 하나 더 열어 프로젝트 폴더로 가서 가상환경을 켠 뒤 잽니다. 질문은 `eval/manual.jsonl`에서 투자 추천·인젝션 문항(모델에 보내지 않고 바로 거절하는 질문)을 뺀 것을 차례로 씁니다. 기본은 20개를 하나씩 보내므로 몇 분 걸립니다.
+```bash
+source .venv/bin/activate
+dartrag bench
+```
+3. 끝나면 p50·p95 표와 기준 통과 여부(✅/❌), 답한 모델이 나옵니다. 모델이 처음 메모리에 올라오는 첫 질문은 느리므로, 평소 속도를 보려면 `dartrag ask`로 한 번 물어본 뒤 재세요.
+
+자주 쓰는 바꿈:
+- 여러 사람이 함께 쓸 때처럼 동시에 4개씩, 모두 40개 보내기
+```bash
+dartrag bench -n 40 -c 4
+```
+- 질문을 직접 넣기 (`-s`는 종목코드)
+```bash
+dartrag bench -q "2024년 HBM 매출 비중은?" -s 005930 -n 5
+```
+- 다른 평가 문항 파일(예: `dartrag eval generate`로 만든 숫자 문항)을 쓰고, 질문별 결과를 파일로 남기기
+```bash
+dartrag bench -f eval/generated.jsonl --out reports/bench.json
+```
+- `--gate`를 붙이면 기준을 넘거나 실패한 질문이 있을 때 실패로 끝납니다. 기준은 `--slo-first-token`, `--slo-total-p95`(초)로 바꿀 수 있습니다.
+- p95는 성공한 질문이 20개는 넘어야 믿을 만합니다. 그보다 적으면 가장 느린 값에 가깝습니다.
+
+## 답변 모델 재시도와 대체 모델
+답변 모델 호출은 모두 LLM 게이트웨이(`answer/gateway.py`)를 거칩니다.
+- **재시도**: Ollama 연결 실패, 5xx 오류, 연결 시간 초과처럼 잠깐의 문제면 0.5초, 1초를 기다려 두 번 더 보냅니다 (`LLM_RETRIES`, `LLM_RETRY_BACKOFF`). 모델을 받지 않은 경우(404)는 다시 보내도 같으므로 바로 넘어갑니다.
+- **시간 제한**: 요청 하나가 `LLM_TIMEOUT`(기본 300초)을 넘으면 끊습니다.
+- **대체 모델**: `.env`에 `LLM_FALLBACK_MODEL`을 넣으면, 기본 모델이 실패하거나 `LLM_FIRST_TOKEN_TIMEOUT`(기본 30초) 안에 첫 글자를 내지 못할 때 대체 모델이 답합니다. 이미 글자가 나가기 시작한 답은 중간에 바꾸지 않습니다 (글이 겹치지 않게). 비워 두면(기본) 쓰지 않습니다.
+
+대체 모델을 쓰려면 더 작은 모델을 받고,
+```bash
+ollama pull qwen3:1.7b
+```
+`.env`에 아래 줄을 넣은 뒤 서버를 다시 켭니다. `dartrag doctor`가 대체 모델을 받아 두었는지 알려 줍니다. 두 모델을 함께 올리면 메모리를 더 씁니다 (qwen3:1.7b 약 1.4GB).
+```
+LLM_FALLBACK_MODEL=qwen3:1.7b
+```
+- 첫 글자 제한(`LLM_FIRST_TOKEN_TIMEOUT`)은 `dartrag bench`로 잰 첫 글자 p95보다 넉넉하게 잡으세요. 너무 짧으면 기본 모델이 멀쩡해도 대체 모델이 자주 답합니다.
+- 어떤 모델이 답했는지는 답변 응답의 `model`, `/metrics`의 `dartrag_llm_requests_total`(대체 모델이면 `outcome="fallback"`), Grafana의 "LLM 요청: 답한 모델" 그래프, Langfuse의 generate 단계 모델 이름에서 봅니다. 실패 사유는 `dartrag_llm_failures_total`에 남습니다.
+- 대체 모델의 답은 답변 캐시에 넣지 않습니다. 평가(`dartrag eval run`, 정기 평가)는 기본 모델만 재도록 대체 모델 없이 돌립니다.
+- 질문 분류·이어지는 질문 바꿔 쓰기·거절 판단은 모델을 부르지 않고 규칙(코드)으로 처리합니다. 그래서 작은 모델로 따로 보낼 단계는 아직 없습니다.
+
 ## 0단계에서 한 것
 - **OpenDART 클라이언트** (`src/dartrag/dart/client.py`): 고유번호, 공시 목록(페이지네이션, 최종 보고서만), 원문 zip, 단일회사 전체 재무제표. 호출 간격 제한, 요청 제한 초과(020)·점검(800)·5xx 재시도, 데이터 없음(013)은 빈 결과로 처리
 - **보고서 해석** (`dart/reports.py`): `[기재정정]사업보고서 (2023.12)` → 종류, 기간, 정정 여부, 보고서 코드. 결산월이 12월이 아닌 회사도 분기 코드를 올바르게 계산

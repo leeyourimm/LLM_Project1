@@ -143,6 +143,7 @@ def build_report(
 
         report.llm_model = answerer.llm.name
         flt = SearchFilter(corp_codes=[corp_code])
+        models: list[str] = []
         for title, question in REPORT_QUESTIONS:
             try:
                 answer = answerer.answer(question.format(name=name), flt)
@@ -150,4 +151,7 @@ def build_report(
                 report.notes.append(f"{title}: 답변 모델을 쓸 수 없어 생략 ({e})")
                 continue
             report.sections.append(answer_section(title, answer))
+            models.append(answer.model or answerer.llm.name)
+        if models:  # 대체 모델이 답한 요약이 있으면 그 이름도 적는다
+            report.llm_model = ", ".join(dict.fromkeys(models))
     return report

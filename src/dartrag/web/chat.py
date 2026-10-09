@@ -149,7 +149,8 @@ def build_router(  # noqa: N803
                 )
             except LLMError as e:
                 raise HTTPException(503, str(e)) from None
-            return finish(repo, conv_id, resolved, result, answerer.llm.name, started)
+            model = result.model or answerer.llm.name
+            return finish(repo, conv_id, resolved, result, model, started)
 
     @router.post("/api/ask/stream", dependencies=[rate("ask")])
     def ask_stream(req: AskRequest, user: CurrentUser = None):
@@ -182,9 +183,8 @@ def build_router(  # noqa: N803
                         elif kind == "token":
                             yield _sse("token", {"text": value})
                         else:
-                            done = finish(
-                                repo, conv_id, resolved, value, answerer.llm.name, started
-                            )
+                            model = value.model or answerer.llm.name
+                            done = finish(repo, conv_id, resolved, value, model, started)
                             yield _sse("done", done)
                 except LLMError as e:
                     yield _sse("error", {"detail": str(e)})

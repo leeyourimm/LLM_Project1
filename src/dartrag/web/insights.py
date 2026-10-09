@@ -102,7 +102,7 @@ def build_router(services, rate=_no_limit) -> APIRouter:
             "found": result.found,
             "warnings": result.warnings,
             "sources": _sources(result.hits, cited, quoted(result)),
-            "model": answerer.llm.name,
+            "model": result.model or answerer.llm.name,
             "disclaimer": DISCLAIMER,
         }
 
