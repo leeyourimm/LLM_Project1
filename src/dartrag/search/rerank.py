@@ -6,6 +6,7 @@
 """
 
 import math
+import threading
 from typing import Protocol
 
 
@@ -16,18 +17,30 @@ class Reranker(Protocol):
 
 
 class CrossEncoderReranker:
+    """모델은 처음 점수를 매길 때 불러온다 (첫 실행이면 약 2GB 를 내려받는다)."""
+
     def __init__(self, model_name: str = "BAAI/bge-reranker-v2-m3", max_length: int = 512):
-        try:
-            from sentence_transformers import CrossEncoder
-        except ImportError as e:
-            raise RuntimeError('리랭커를 쓰려면 먼저 설치하세요: pip install -e ".[embed]"') from e
         self.name = model_name
-        self._model = CrossEncoder(model_name, max_length=max_length)
+        self._max_length = max_length
+        self._model = None
+        self._lock = threading.Lock()
+
+    def _loaded(self):
+        with self._lock:
+            if self._model is None:
+                try:
+                    from sentence_transformers import CrossEncoder
+                except ImportError as e:
+                    raise RuntimeError(
+                        '리랭커를 쓰려면 먼저 설치하세요: pip install -e ".[embed]"'
+                    ) from e
+                self._model = CrossEncoder(self.name, max_length=self._max_length)
+            return self._model
 
     def score(self, query: str, texts: list[str]) -> list[float]:
         if not texts:
             return []
-        raw = [float(x) for x in self._model.predict([(query, t) for t in texts])]
+        raw = [float(x) for x in self._loaded().predict([(query, t) for t in texts])]
         # 모델에 따라 로짓으로 나오므로 0~1 로 맞춘다
         if any(x < 0 or x > 1 for x in raw):
             raw = [1 / (1 + math.exp(-x)) for x in raw]

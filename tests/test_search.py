@@ -256,3 +256,35 @@ def test_keyword_index_reports_errors():
         idx.upsert(CHUNKS[:1])
     with pytest.raises(OpenSearchError, match="500"):
         idx.search("x", SearchFilter(), 5)
+
+
+def test_models_load_on_first_use(monkeypatch):
+    """검색기를 만들기만 해서는 모델(각 약 2GB)을 불러오지 않는다."""
+    import sys
+    import types
+
+    from dartrag.search import SentenceTransformerEmbedder
+    from dartrag.search.rerank import CrossEncoderReranker
+
+    loaded = []
+
+    class Model:
+        def __init__(self, name, **kw):
+            loaded.append(name)
+
+        def get_sentence_embedding_dimension(self):
+            return 3
+
+        def encode(self, texts, **kw):
+            return [types.SimpleNamespace(tolist=lambda: [1.0, 0.0, 0.0]) for _ in texts]
+
+        def predict(self, pairs):
+            return [0.5 for _ in pairs]
+
+    fake = types.SimpleNamespace(SentenceTransformer=Model, CrossEncoder=Model)
+    monkeypatch.setitem(sys.modules, "sentence_transformers", fake)
+    embedder, reranker = SentenceTransformerEmbedder("emb"), CrossEncoderReranker("rr")
+    assert loaded == [] and embedder.name == "emb" and reranker.name == "rr"
+    assert embedder.embed_query("매출") == [1.0, 0.0, 0.0] and embedder.dim == 3
+    assert reranker.score("매출", ["a", "b"]) == [0.5, 0.5]
+    assert loaded == ["emb", "rr"]  # 한 번만 불러온다
