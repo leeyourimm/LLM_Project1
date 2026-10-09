@@ -15,7 +15,7 @@ const NAV = [
   { href: "/diff", label: "변경점" },
 ];
 // 로그인 없이 열 수 있는 화면
-const PUBLIC = ["/login", "/signup", "/terms", "/privacy"];
+const PUBLIC = ["/login", "/signup", "/terms", "/privacy", "/forgot-password", "/reset-password", "/verify-email"];
 
 function ThemeToggle() {
   const [theme, setTheme] = useState<string | null>(null);
@@ -48,6 +48,20 @@ function ThemeToggle() {
     >
       {label}
     </button>
+  );
+}
+
+// 가입 이메일 인증 전(EMAIL_VERIFICATION_REQUIRED=true)일 때 모든 화면 위에 보이는 안내
+function VerifyBanner() {
+  return (
+    <div role="status" className="border-b border-warning/40 bg-warning-soft">
+      <p className="mx-auto max-w-6xl px-4 py-2 text-sm">
+        가입한 이메일을 아직 인증하지 않았습니다. 메일함의 인증 링크를 열어야 이메일 알림을 켤 수 있습니다.{" "}
+        <Link href="/account" className="link">
+          인증 메일 다시 받기
+        </Link>
+      </p>
+    </div>
   );
 }
 
@@ -104,6 +118,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
           </div>
         </div>
       </header>
+      {auth?.user && auth.email_verification_required && !auth.user.email_verified && !isPublic ? <VerifyBanner /> : null}
       <main className="mx-auto w-full max-w-6xl flex-1 px-4 py-6">
         {auth === null || needLogin ? <Loading /> : children}
       </main>

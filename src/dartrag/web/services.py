@@ -22,6 +22,8 @@ class Services:
     allow_signup: bool = True
     cookie_secure: bool = False
     session_days: int = 30
+    # 가입한 이메일을 인증해야 이메일 알림을 켤 수 있다 (메일 발송이 설정된 경우에만 적용)
+    email_verification_required: bool = False
     report_font: str | None = None  # PDF 리포트용 한글 TTF 경로 (없으면 자동 탐색)
     # 알림: 발송 수단({"email": …, "telegram": …}), 변경점 요약용 LLM
     senders: Callable[[], dict] = dict
@@ -72,6 +74,7 @@ def default_services(settings: Settings) -> Services:
         allow_signup=settings.allow_signup,
         cookie_secure=settings.cookie_secure,
         session_days=settings.session_days,
+        email_verification_required=settings.email_verification_required,
         report_font=settings.report_font,
         senders=cache(lambda: build_senders(settings)),
         llm=cache(lambda: build_llm(settings)),

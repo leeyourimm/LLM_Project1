@@ -70,7 +70,7 @@ test("가입 → 로그인 → 질문 → 내 데이터 내려받기 → 탈퇴 
   await page.getByRole("checkbox", { name: /되돌릴 수 없다는 것을 이해했습니다/ }).check();
   await remove.click();
   // 로그인 화면으로 (지금 화면이 ?next 로 붙을 수 있다)
-  await expect(page).toHaveURL(/\/login(\?next=%2Faccount)?$/);
+  await expect(page).toHaveURL(/\/login$/);
   await expect(page.getByRole("button", { name: "로그인" })).toBeVisible();
   // 탈퇴 응답 뒤 LLM 추적 삭제를 요청했다
   await expect.poll(() => forgottenCount(request)).toBe(before + 1);

@@ -46,6 +46,11 @@ dartrag user add me@example.com
 - 로그인을 켜면 공개 API는 `/api/health`와 로그인 관련 API뿐이고, 나머지는 로그인해야 쓸 수 있습니다.
 - 비밀번호는 scrypt 해시로만 저장하고, 세션 토큰도 해시로만 저장합니다. 비밀번호를 바꾸면 그 계정의 다른 로그인은 모두 끊깁니다.
 - 같은 계정이나 같은 IP에서 로그인을 여러 번 틀리면 15분 동안 막습니다.
+- 메일 발송(`SMTP_`)을 설정하면 계정 메일을 씁니다. 메일 속 링크는 `PUBLIC_URL`(사용자가 여는 화면 주소)로 갑니다.
+  - 비밀번호 재설정: 로그인 화면의 "비밀번호를 잊으셨나요?"에서 이메일을 넣으면 30분 동안 한 번만 쓸 수 있는 링크를 보냅니다. 가입하지 않은 주소여도 같은 안내가 나와 가입 여부가 드러나지 않습니다. 새 비밀번호를 정하면 다른 기기의 로그인은 모두 끊깁니다.
+  - 가입 이메일 인증: 가입하면 인증 링크를 보냅니다. 인증하지 않아도 로그인은 됩니다. `EMAIL_VERIFICATION_REQUIRED=true`면 인증 전에는 화면 위에 안내가 보이고 이메일 알림을 켤 수 없습니다. 계정 화면에서 인증 메일을 다시 받을 수 있습니다.
+  - 새 기기 로그인 알림: 처음 보는 브라우저·OS·접속 네트워크 조합으로 로그인하면 인증된 주소로 알립니다. 기기 정보는 해시로만 저장합니다.
+  - 메일 발송을 설정하지 않으면 이 기능들은 꺼지고, 비밀번호를 잊은 사용자는 운영자가 `dartrag user password 이메일`로 바꿉니다. `dartrag doctor`가 계정 메일 설정 상태를 알려 줍니다.
 - 관심 종목은 사용자마다 따로 저장됩니다. 웹훅 알림은 운영자 목록(`dartrag watch`) 기준입니다.
 - `COOKIE_SECURE=true`는 https로 서비스할 때만 켜세요. http에서 켜면 로그인이 유지되지 않습니다. 리버스 프록시 뒤에서 쓸 때는 실제 접속 IP가 보이도록 `uvicorn`의 `--proxy-headers` 설정이 필요합니다.
 
@@ -123,7 +128,7 @@ dartrag ask "2024년 HBM 매출 비중은?" -s 005930
 - **API** (`/api/docs`에서 확인): `POST /api/ask`, `GET /api/search`, `GET /api/feed`, `GET·POST·DELETE /api/watchlist`, `GET /api/diff`, `GET /api/companies`, `GET /api/compare`, `GET /api/company/{종목코드}/report.pdf`. 임베딩 모델은 첫 질문 때 한 번만 올리고, DB 연결은 요청마다 따로 엶
 
 - **회사 대시보드** (웹 "회사" 탭, `GET /api/company/{종목코드}`): 최근 연도 핵심 지표와 전년 대비 변화, 연도별 매출·이익 막대 차트, 이익률 꺾은선 차트(표로 보기 포함), 최근 90일 공시, 최근 사업보고서 변경점 요약. 숫자는 질문 답변과 같은 계정 선택 규칙을 씀
-- **로그인** (`web/auth.py`, `AUTH_REQUIRED=true`일 때만): 가입·로그인·로그아웃·비밀번호 변경, 사용자별 관심 종목, 로그인 시도 제한, 다른 사이트에서 보낸 요청 차단, 보안 헤더(CSP 등). 관리 명령 `dartrag user add/password/list/remove`
+- **로그인** (`web/auth.py`, `AUTH_REQUIRED=true`일 때만): 가입·로그인·로그아웃·비밀번호 변경, 메일로 비밀번호 재설정·가입 이메일 인증·새 기기 로그인 알림(`web/account_mail.py`), 사용자별 관심 종목, 로그인 시도 제한, 다른 사이트에서 보낸 요청 차단, 보안 헤더(CSP 등). 관리 명령 `dartrag user add/password/list/remove`
 - **대화** (`answer/conversation.py`, `web/chat.py`): "그럼 전년은?", "SK하이닉스는?"처럼 이어지는 질문의 회사·연도·주제를 앞 질문에서 이어받아 완전한 질문으로 바꾸고, 어떻게 해석했는지 응답에 함께 돌려줌. 질문 속 회사로 검색 범위를 좁혀 다른 회사 문서가 섞이지 않게 함. 대화 기록 저장·조회·삭제(로그인하면 사용자별). `POST /api/ask/stream`은 답변을 만들어지는 대로 보내는 스트리밍(Server-Sent Events)
 - **답변 평가** (`POST /api/messages/{id}/feedback`): 👍/👎와 사유(숫자 틀림, 출처 틀림, 못 찾음 등). `dartrag feedback stats`로 집계, `dartrag feedback export`로 👎 질문을 평가셋 후보로 내보냄
 - **검색 품질** (`search/hybrid.py`, `search/rerank.py`):

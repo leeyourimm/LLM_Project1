@@ -70,7 +70,13 @@ export function AuthForm({ mode }: { mode: "login" | "signup" }) {
           <p id="pw-hint" className="mt-1 text-xs text-muted">
             10자 이상으로 정해 주세요.
           </p>
-        ) : null}
+        ) : (
+          <p className="mt-1 text-right text-xs">
+            <Link className="link" href="/forgot-password">
+              비밀번호를 잊으셨나요?
+            </Link>
+          </p>
+        )}
       </div>
       {signup ? (
         <label className="flex items-start gap-2 text-sm">

@@ -1,6 +1,5 @@
 "use client";
 
-import { useRouter } from "next/navigation";
 import { useState } from "react";
 import { useApp } from "@/components/providers";
 import { ErrorBox, PageTitle } from "@/components/ui";
@@ -12,10 +11,66 @@ export default function AccountPage() {
   return (
     <div className="max-w-lg space-y-4">
       <PageTitle title="계정" sub={auth.user.email} />
+      <EmailCard />
       <PasswordForm />
       <ExportCard />
       <DeleteAccount />
     </div>
+  );
+}
+
+function EmailCard() {
+  const { auth, refreshAuth } = useApp();
+  const [note, setNote] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<unknown>(null);
+  const verified = Boolean(auth?.user?.email_verified);
+
+  return (
+    <section className="card space-y-3" aria-labelledby="email-title">
+      <h2 id="email-title" className="font-semibold">
+        이메일 인증
+      </h2>
+      {verified ? (
+        <p className="text-sm text-good">인증된 이메일입니다. 처음 보는 기기에서 로그인하면 이 주소로 알려 드립니다.</p>
+      ) : auth?.email_enabled ? (
+        <>
+          <p className="text-sm">
+            아직 인증하지 않았습니다.{" "}
+            {auth.email_verification_required ? "인증해야 이메일 알림을 켤 수 있습니다." : "인증하면 새 기기 로그인 알림을 받을 수 있습니다."}
+          </p>
+          {error ? <ErrorBox error={error} /> : null}
+          {note ? (
+            <p role="status" className="text-sm">
+              {note}
+            </p>
+          ) : null}
+          <button
+            type="button"
+            className="btn"
+            disabled={busy}
+            onClick={async () => {
+              setBusy(true);
+              setError(null);
+              setNote(null);
+              try {
+                const r = await post<{ sent_to?: string; already_verified?: boolean }>("/api/auth/verify-email/resend");
+                if (r.already_verified) await refreshAuth();
+                else setNote(`${r.sent_to}로 인증 메일을 보냈습니다. 24시간 안에 메일의 링크를 열어 주세요.`);
+              } catch (err) {
+                setError(err);
+              } finally {
+                setBusy(false);
+              }
+            }}
+          >
+            {busy ? "보내는 중…" : "인증 메일 다시 받기"}
+          </button>
+        </>
+      ) : (
+        <p className="text-sm text-muted">이 서버에는 메일 발송이 설정되지 않아 이메일 인증을 쓰지 않습니다.</p>
+      )}
+    </section>
   );
 }
 
@@ -98,8 +153,6 @@ function ExportCard() {
 }
 
 function DeleteAccount() {
-  const { refreshAuth } = useApp();
-  const router = useRouter();
   const [password, setPassword] = useState("");
   const [confirm, setConfirm] = useState(false);
   const [busy, setBusy] = useState(false);
@@ -115,8 +168,9 @@ function DeleteAccount() {
         setError(null);
         try {
           await del("/api/account", { password });
-          await refreshAuth();
-          router.replace("/login");
+          // 화면 상태를 새로 읽으면 로그인 확인이 먼저 돌아 /login?next=/account 로 가므로,
+          // 페이지를 새로 열어 깨끗한 로그인 화면으로 보낸다
+          window.location.replace("/login");
         } catch (err) {
           setError(err);
           setBusy(false);

@@ -59,6 +59,20 @@ def build_routers(services, CurrentUser) -> tuple[APIRouter, APIRouter]:  # noqa
             )
         return user
 
+    def need_verified_email(user) -> None:
+        """EMAIL_VERIFICATION_REQUIRED=true 면 가입한 이메일을 인증해야 이메일 알림을 켤 수 있다.
+        메일 발송이 없으면 인증할 방법이 없어 강제하지 않는다."""
+        if not services.email_verification_required or "email" not in services.senders():
+            return
+        with services.repo() as repo:
+            verified = repo.email_verified(user.id)
+        if not verified:
+            raise HTTPException(
+                403,
+                "가입한 이메일을 먼저 인증해 주세요. "
+                "계정 화면에서 인증 메일을 다시 받을 수 있습니다",
+            )
+
     def throttle(user_id: int, kind: str) -> None:
         now = time.monotonic()
         if now - last_sent.get((user_id, kind), -1e9) < RESEND_SECONDS:
@@ -76,7 +90,18 @@ def build_routers(services, CurrentUser) -> tuple[APIRouter, APIRouter]:  # noqa
             return {"per_user": False, "available": available, "channels": []}
         with services.repo() as repo:
             rows = repo.alert_channels(user.id)
-        return {"per_user": True, "available": available, "channels": rows}
+            # 이메일 알림을 켜려면 먼저 가입 이메일 인증이 필요한지 (화면 안내용)
+            needs = (
+                services.email_verification_required
+                and available["email"]
+                and not repo.email_verified(user.id)
+            )
+        return {
+            "per_user": True,
+            "available": available,
+            "channels": rows,
+            "email_needs_verification": needs,
+        }
 
     @api.post("/api/alerts/email", status_code=202)
     def start_email(background: BackgroundTasks, user: CurrentUser = None):
@@ -85,6 +110,7 @@ def build_routers(services, CurrentUser) -> tuple[APIRouter, APIRouter]:  # noqa
         sender = services.senders().get("email")
         if sender is None:
             raise HTTPException(503, "메일 발송이 설정되지 않았습니다 (SMTP_HOST)")
+        need_verified_email(user)
         throttle(user.id, "email")
         code, hashed = new_link_code()
         until = datetime.now(UTC) + timedelta(hours=VERIFY_HOURS)
@@ -121,6 +147,8 @@ def build_routers(services, CurrentUser) -> tuple[APIRouter, APIRouter]:  # noqa
     @api.patch("/api/alerts/{kind}")
     def set_enabled(kind: Annotated[Kind, Path()], req: EnabledRequest, user: CurrentUser = None):
         user = need_user(user)
+        if kind == "email" and req.enabled:
+            need_verified_email(user)
         with services.repo() as repo:
             if not repo.set_alert_enabled(user.id, kind, req.enabled):
                 raise HTTPException(404, "등록된 알림 채널이 아닙니다")
@@ -140,6 +168,9 @@ def build_routers(services, CurrentUser) -> tuple[APIRouter, APIRouter]:  # noqa
     def verify_email(token: Annotated[str, Query(max_length=100)]):
         with services.repo() as repo:
             user_id = repo.confirm_alert_channel("email", token_hash(token))
+            if user_id is not None:
+                # 알림 인증 메일도 가입한 주소로만 보내므로 가입 이메일 인증으로 함께 친다
+                repo.mark_email_verified(user_id)
         if user_id is None:
             return _page("링크가 만료됐습니다", "알림 설정에서 인증 메일을 다시 받아 주세요.")
         return RedirectResponse("/#alerts", status_code=303)

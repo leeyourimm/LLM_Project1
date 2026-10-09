@@ -63,6 +63,8 @@ class Settings(BaseSettings):
     allow_signup: bool = True
     cookie_secure: bool = False  # https 로 서비스할 때 true
     session_days: int = 30
+    # 가입한 이메일을 인증해야 이메일 알림을 켤 수 있게 할지. 메일 발송(SMTP)이 있어야 적용된다
+    email_verification_required: bool = False
 
     # 작업자(Celery). 주기는 분 단위
     feed_poll_minutes: int = 10
@@ -86,7 +88,8 @@ class Settings(BaseSettings):
     rate_ask_per_minute: int = 6
     rate_ask_per_day: int = 200
     rate_heavy_per_hour: int = 10  # 비교 설명, 변경점 요약 새로 만들기, 요약이 든 PDF
-    rate_auth_per_hour: int = 20  # 가입·비밀번호 변경 (로그인 시도는 따로 제한)
+    # 가입·비밀번호 변경·재설정 메일·인증 메일 다시 받기 (로그인 시도는 따로 제한)
+    rate_auth_per_hour: int = 20
 
     # 운영 관측. 모두 비우면 꺼진다
     environment: str = "development"  # development / production

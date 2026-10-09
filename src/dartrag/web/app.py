@@ -32,16 +32,23 @@ from pydantic import BaseModel, Field
 from dartrag.obs import metrics
 from dartrag.obs.metrics import StateCollector
 from dartrag.search import SearchFilter
-from dartrag.web import auth
+from dartrag.web import account_mail, auth
 from dartrag.web.alerts import build_routers as build_alert_routers
 from dartrag.web.chat import DISCLAIMER, build_router
 from dartrag.web.chat import source_dict as _source
 from dartrag.web.insights import build_router as build_insights_router
-from dartrag.web.ratelimit import RateLimiter, make_dependency
+from dartrag.web.ratelimit import RateLimiter, Rule, make_dependency
 from dartrag.web.services import Services
 
 log = logging.getLogger(__name__)
 STATIC = pathlib.Path(__file__).parent / "static"
+log = logging.getLogger(__name__)
+
+# 같은 주소로 재설정 메일이 쏟아지지 않게 주소별로도 센다 (넘어도 응답은 같고 메일만 안 보냄)
+RESET_MAIL_RULE = Rule(3, 3600, "1시간에 3번")
+VERIFY_RESEND_RULE = Rule(1, 60, "1분에 1번")
+EXPIRED_RESET = "링크가 만료됐거나 이미 사용했습니다. 비밀번호 재설정을 다시 요청해 주세요"
+EXPIRED_VERIFY = "링크가 만료됐거나 이미 사용했습니다. 계정 화면에서 인증 메일을 다시 받아 주세요"
 
 
 class Credentials(BaseModel):
@@ -55,6 +62,18 @@ class PasswordChange(BaseModel):
 
 
 class AccountDelete(BaseModel):
+    password: str = Field(max_length=auth.PASSWORD_MAX)
+
+
+class ForgotRequest(BaseModel):
+    email: str = Field(max_length=254)
+
+
+class TokenRequest(BaseModel):
+    token: str = Field(min_length=1, max_length=100)
+
+
+class PasswordReset(TokenRequest):
     password: str = Field(max_length=auth.PASSWORD_MAX)
 
 
@@ -185,17 +204,84 @@ def create_app(services: Services, limiter: auth.LoginLimiter | None = None) -> 
         if not services.auth_required:
             raise HTTPException(400, "로그인을 쓰지 않는 설정입니다 (AUTH_REQUIRED=false)")
 
+    # --- 계정 메일 (비밀번호 재설정, 이메일 인증, 새 기기 알림) -------------------
+
+    def email_sender():
+        """메일 발송 수단. SMTP 를 설정하지 않았으면 None (메일 기능은 조용히 꺼진다)."""
+        return services.senders().get("email")
+
+    def verification_enforced() -> bool:
+        # 메일을 보낼 수 없으면 인증할 방법이 없으므로 강제하지 않는다 (doctor 가 알려 준다)
+        return services.email_verification_required and email_sender() is not None
+
+    def send_mail(background: BackgroundTasks, to: str, mail: tuple[str, str], what: str):
+        """응답을 먼저 돌려주고 메일은 뒤에서 보낸다 (응답 시간으로 가입 여부가 드러나지 않게).
+        받는 주소, 링크, SMTP 오류 내용은 로그에 남기지 않는다."""
+        sender = email_sender()
+        if sender is None:
+            return
+
+        def run():
+            try:
+                sender.send(to, *mail)
+            except Exception as e:  # noqa: BLE001 - 메일이 실패해도 요청은 끝난다
+                log.warning("%s 메일 발송 실패: %s", what, type(e).__name__)
+
+        background.add_task(run)
+
+    def send_verification(background: BackgroundTasks, user_id: int, email: str) -> None:
+        token, hashed = auth.new_link_token()
+        until = datetime.now(UTC) + timedelta(hours=account_mail.VERIFY_HOURS)
+        with services.repo() as repo:
+            repo.create_auth_token(user_id, "verify", hashed, until)
+        mail = account_mail.verify_mail(services.public_url, token)
+        send_mail(background, email, mail, "이메일 인증")
+
+    def client_ip(request: Request) -> str:
+        return request.client.host if request.client else "-"
+
+    def note_login(
+        request: Request,
+        background: BackgroundTasks,
+        user_id: int,
+        email: str,
+        notify: bool = True,
+    ) -> None:
+        """로그인한 기기를 기록하고, 처음 보는 기기면 인증된 주소로 알린다.
+
+        기기 기록이 하나도 없던 계정(가입 직후, 이 기능 전에 만든 계정)은 알리지 않는다.
+        인증하지 않은 주소에는 보내지 않는다 (남의 주소로 가입해 메일을 쏟아내지 못하게)."""
+        ua = request.headers.get("user-agent")
+        ip = client_ip(request)
+        hashed = auth.device_hash(services.secret_key, user_id, ua, ip)
+        with services.repo() as repo:
+            status = repo.remember_device(user_id, hashed)
+            alert = status == "new" and notify and repo.email_verified(user_id)
+        if alert:
+            browser, system = auth.device_label(ua)
+            mail = account_mail.new_device_mail(
+                services.public_url, browser, system, auth.network_of(ip)
+            )
+            send_mail(background, email, mail, "새 기기 로그인")
+
     @app.get("/api/auth/me")
     def me(request: Request):
         user = session_user(request) if services.auth_required else None
+        info = None
+        if user:
+            with services.repo() as repo:
+                info = {"email": user.email, "email_verified": repo.email_verified(user.id)}
         return {
             "auth_required": services.auth_required,
             "allow_signup": services.allow_signup,
-            "user": {"email": user.email} if user else None,
+            # 메일 발송이 설정됐는지 (비밀번호 재설정, 이메일 인증 화면이 쓴다)
+            "email_enabled": services.auth_required and email_sender() is not None,
+            "email_verification_required": services.auth_required and verification_enforced(),
+            "user": info,
         }
 
     @app.post("/api/auth/signup", status_code=201, dependencies=[rate("auth")])
-    def signup(req: Credentials, response: Response):
+    def signup(req: Credentials, request: Request, response: Response, background: BackgroundTasks):
         need_auth_mode()
         if not services.allow_signup:
             raise HTTPException(403, "지금은 가입을 받지 않습니다. 관리자에게 계정을 요청하세요")
@@ -209,12 +295,15 @@ def create_app(services: Services, limiter: auth.LoginLimiter | None = None) -> 
         if user_id is None:
             raise HTTPException(409, "이미 가입된 이메일입니다")
         start_session(response, user_id)
-        return {"user": {"email": email}}
+        note_login(request, background, user_id, email, notify=False)
+        if email_sender() is not None:
+            send_verification(background, user_id, email)
+        return {"user": {"email": email, "email_verified": False}}
 
     @app.post("/api/auth/login")
-    def login(req: Credentials, request: Request, response: Response):
+    def login(req: Credentials, request: Request, response: Response, background: BackgroundTasks):
         need_auth_mode()
-        ip = request.client.host if request.client else "-"
+        ip = client_ip(request)
         email = (req.email or "").strip().lower()
         if limiter.blocked(ip, email):
             raise HTTPException(429, "로그인 시도가 너무 많습니다. 15분 뒤에 다시 해주세요")
@@ -227,7 +316,83 @@ def create_app(services: Services, limiter: auth.LoginLimiter | None = None) -> 
             raise HTTPException(401, "이메일 또는 비밀번호가 맞지 않습니다")
         limiter.succeeded(ip, email)
         start_session(response, row[0])
+        note_login(request, background, row[0], row[1])
         return {"user": {"email": row[1]}}
+
+    @app.post("/api/auth/password/forgot", status_code=202, dependencies=[rate("auth")])
+    def forgot_password(req: ForgotRequest, background: BackgroundTasks):
+        """재설정 링크 요청. 가입하지 않은 주소여도 같은 응답을 돌려준다."""
+        need_auth_mode()
+        if email_sender() is None:
+            # 계정과 관계없는 서버 설정이라 알려 줘도 가입 여부는 드러나지 않는다
+            raise HTTPException(503, account_mail.NO_MAIL)
+        try:
+            email = auth.normalize_email(req.email)
+        except auth.AuthError as e:
+            raise HTTPException(422, str(e)) from None
+        # 주소는 해시해서 센다 (Redis 에 주소 원문을 남기지 않게)
+        flooded = rate_limiter.hit("reset-mail", auth.token_hash(email), [RESET_MAIL_RULE])
+        token = None
+        with services.repo() as repo:
+            row = repo.user_by_email(email)
+            if row and not flooded:
+                token, hashed = auth.new_link_token()
+                until = datetime.now(UTC) + timedelta(minutes=account_mail.RESET_MINUTES)
+                repo.create_auth_token(row[0], "reset", hashed, until)
+        if token:
+            mail = account_mail.reset_mail(services.public_url, token)
+            send_mail(background, row[1], mail, "비밀번호 재설정")
+        return {"ok": True, "message": account_mail.FORGOT_MESSAGE}
+
+    @app.post("/api/auth/password/reset", dependencies=[rate("auth")])
+    def reset_password(
+        req: PasswordReset, request: Request, response: Response, background: BackgroundTasks
+    ):
+        """메일 링크의 토큰으로 새 비밀번호를 정한다. 다른 기기의 로그인은 모두 끊는다."""
+        need_auth_mode()
+        try:
+            # 토큰을 쓰기 전에 검사해야 정책에 걸려도 같은 링크로 다시 할 수 있다
+            auth.check_password_policy(req.password)
+        except auth.AuthError as e:
+            raise HTTPException(422, str(e)) from None
+        with services.repo() as repo:
+            found = repo.consume_auth_token("reset", auth.token_hash(req.token))
+            if found is None:
+                raise HTTPException(400, EXPIRED_RESET)
+            user_id, email = found
+            repo.reset_password(user_id, auth.hash_password(req.password))
+        limiter.succeeded(client_ip(request), email)
+        start_session(response, user_id)
+        # 메일을 받아 직접 바꾼 기기라 알리지 않고 기록만 한다
+        note_login(request, background, user_id, email, notify=False)
+        return {"user": {"email": email, "email_verified": True}}
+
+    @app.post("/api/auth/verify-email", dependencies=[rate("auth")])
+    def verify_email(req: TokenRequest):
+        """가입 인증 링크. 로그인하지 않은 기기(휴대폰 메일 앱)에서 열어도 된다."""
+        need_auth_mode()
+        with services.repo() as repo:
+            found = repo.consume_auth_token("verify", auth.token_hash(req.token))
+            if found:
+                repo.mark_email_verified(found[0])
+        if found is None:
+            raise HTTPException(400, EXPIRED_VERIFY)
+        return {"ok": True}
+
+    @api.post("/api/auth/verify-email/resend", status_code=202, dependencies=[rate("auth")])
+    def resend_verification(user: CurrentUser, background: BackgroundTasks):
+        need_auth_mode()
+        if email_sender() is None:
+            raise HTTPException(503, "메일 발송이 설정되지 않았습니다 (SMTP_HOST)")
+        with services.repo() as repo:
+            if repo.email_verified(user.id):
+                return {"ok": True, "already_verified": True}
+        if rate_limiter.hit("verify-mail", f"u{user.id}", [VERIFY_RESEND_RULE]):
+            raise HTTPException(
+                429, "인증 메일은 1분에 한 번 보낼 수 있습니다", headers={"Retry-After": "60"}
+            )
+        send_verification(background, user.id, user.email)
+        return {"ok": True, "sent_to": user.email}
 
     @app.post("/api/auth/logout")
     def logout(request: Request, response: Response):

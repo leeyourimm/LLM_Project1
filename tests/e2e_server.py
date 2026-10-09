@@ -5,7 +5,9 @@
 
     E2E_DATABASE_URL=postgresql://… python -m tests.e2e_server
 
-탈퇴할 때 추적 삭제를 요청했는지 화면 테스트에서 확인할 수 있게 /api/_e2e/forgotten 을 연다.
+탈퇴할 때 추적 삭제를 요청했는지 화면 테스트에서 확인할 수 있게 /api/_e2e/forgotten 을,
+계정 메일(인증, 비밀번호 재설정)의 링크를 열어 볼 수 있게 /api/_e2e/mail 을 연다.
+메일은 실제로 보내지 않고 메모리에만 담는다.
 이 파일은 테스트 전용이며 배포 코드에서 쓰지 않는다.
 """
 
@@ -58,6 +60,16 @@ class SpyTracer:
         self.forgotten.append(user_id)
 
 
+class CaptureSender:
+    """보낸 메일을 받는 주소별로 메모리에 담는다 (SMTP 로 보내지 않음)."""
+
+    def __init__(self):
+        self.sent: list[dict] = []
+
+    def send(self, to, subject, text, unsubscribe_url=None) -> None:
+        self.sent.append({"to": to, "subject": subject, "text": text})
+
+
 def build(url: str, origin: str):
     migrate = Repository.connect(url)
     try:
@@ -74,6 +86,7 @@ def build(url: str, origin: str):
             r.conn.close()
 
     spy = SpyTracer()
+    mail = CaptureSender()
     services = Services(
         repo,
         lambda r: Answerer(FakeRetriever(), FakeLLM()),
@@ -83,12 +96,19 @@ def build(url: str, origin: str):
         cookie_secure=False,
         allowed_origins=(origin,),
         tracer=lambda: spy,
+        senders=lambda: {"email": mail},
+        public_url=origin,
     )
     app = create_app(services)
 
     @app.get("/api/_e2e/forgotten", include_in_schema=False)
     def forgotten():
         return {"count": len(spy.forgotten)}
+
+    @app.get("/api/_e2e/mail", include_in_schema=False)
+    def last_mail(to: str, subject: str = ""):
+        found = [m for m in mail.sent if m["to"] == to and subject in m["subject"]]
+        return found[-1] if found else {}
 
     return app
 
