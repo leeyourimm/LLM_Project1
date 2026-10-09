@@ -36,6 +36,8 @@ class Services:
     # 운영 지표: /metrics 보호용 토큰, DB·Redis 상태 읽기
     metrics_token: str = ""
     ops_snapshot: Callable[[], dict] | None = None
+    # LLM 추적(Langfuse). 탈퇴할 때 그 사용자의 추적 삭제를 요청하는 데 쓴다
+    tracer: Callable[[], object] | None = None
     # 화면을 다른 주소에서 띄울 때(예: Next 개발 서버 http://localhost:3000) 그 주소
     allowed_origins: tuple[str, ...] = ()
 
@@ -50,6 +52,7 @@ def default_services(settings: Settings) -> Services:
         build_retriever,
         build_senders,
     )
+    from dartrag.obs.tracing import get_tracer
 
     backends = Backends(settings)
 
@@ -83,6 +86,7 @@ def default_services(settings: Settings) -> Services:
         redis=lambda: backends.redis,
         metrics_token=settings.metrics_token,
         ops_snapshot=lambda: ops_snapshot(settings, repo, backends.redis),
+        tracer=lambda: get_tracer(settings),
     )
 
 

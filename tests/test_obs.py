@@ -11,7 +11,7 @@ from dartrag.answer import Answerer, Message, OllamaLLM
 from dartrag.eval.gate import check_release, load_criteria, render_checks
 from dartrag.obs import metrics
 from dartrag.obs.errors import scrub_event
-from dartrag.obs.tracing import LangfuseTracer
+from dartrag.obs.tracing import NOOP, LangfuseTracer, pseudonym
 from dartrag.web.app import create_app
 from dartrag.web.ratelimit import RateLimiter, Rule
 from dartrag.web.services import Services
@@ -133,12 +133,145 @@ def attrs(span):
     return out
 
 
+KEY = "test-secret-key-for-pseudonyms-0123456789"
+
+
+def test_pseudonym_is_keyed_and_stable():
+    a = pseudonym(b"k1", "user", 7)
+    assert a == pseudonym(b"k1", "user", 7)  # 같은 사용자끼리는 묶인다
+    assert a != pseudonym(b"k2", "user", 7)  # 비밀값을 모르면 번호로 다시 만들 수 없다
+    assert a != pseudonym(b"k1", "session", 7)  # 사용자·대화 번호가 같아도 다른 값
+    assert a != pseudonym(b"k1", "user", 8) and len(a) == 34
+
+
+def test_pseudonym_without_secret_key_is_random_per_process():
+    t1 = LangfuseTracer("http://lf", "pk", "sk", background=False)
+    t2 = LangfuseTracer("http://lf", "pk", "sk", background=False)
+    assert t1.user_pseudonym(7) != t2.user_pseudonym(7)
+    assert t1.user_pseudonym(None) is None
+
+
+@respx.mock
+def test_forget_user_deletes_that_users_traces():
+    tracer = LangfuseTracer("http://lf", "pk", "sk", background=False, pseudonym_key=KEY)
+    send = respx.post("http://lf/api/public/otel/v1/traces").mock(
+        return_value=httpx.Response(200, json={})
+    )
+    tracer.trace("answer", input="q", user_id=7).end("a")  # 아직 큐에 있는 것도 먼저 보낸다
+    user = tracer.user_pseudonym(7)
+    pages = {
+        "1": {"data": [{"id": "t1"}, {"id": "t2"}], "meta": {"totalPages": 2}},
+        "2": {"data": [{"id": "t3"}], "meta": {"totalPages": 2}},
+    }
+
+    def listing(request):
+        assert request.url.params["userId"] == user
+        assert request.url.params["fields"] == "core"
+        return httpx.Response(200, json=pages[request.url.params["page"]])
+
+    respx.get("http://lf/api/public/traces").mock(side_effect=listing)
+    delete = respx.delete("http://lf/api/public/traces").mock(
+        return_value=httpx.Response(200, json={"message": "ok"})
+    )
+    tracer.forget_user(7)
+    assert send.called
+    assert [json.loads(c.request.content) for c in delete.calls] == [
+        {"traceIds": ["t1", "t2", "t3"]}
+    ]
+
+
+@respx.mock
+def test_forget_user_failures_are_logged_without_content(caplog):
+    tracer = LangfuseTracer("http://lf", "pk", "sk", background=False, pseudonym_key=KEY)
+    respx.get("http://lf/api/public/traces").mock(
+        return_value=httpx.Response(404, text="not found: u_secret a@b.co")
+    )
+    tracer.forget_user(7)  # 예외 없이 끝난다
+    respx.get("http://lf/api/public/traces").mock(side_effect=httpx.ConnectError("a@b.co"))
+    tracer.forget_user(7)
+    text = caplog.text
+    assert "HTTP 404" in text and "ConnectError" in text
+    assert "a@b.co" not in text and tracer.user_pseudonym(7) not in text
+
+
+@respx.mock
+def test_forget_user_can_be_turned_off():
+    tracer = LangfuseTracer(
+        "http://lf", "pk", "sk", background=False, pseudonym_key=KEY, delete_on_forget=False
+    )
+    listing = respx.get("http://lf/api/public/traces")
+    tracer.forget_user(7)
+    assert not listing.called
+    NOOP.forget_user(7)
+
+
+def test_account_delete_asks_tracer_to_forget():
+    from dartrag.web.auth import LoginLimiter
+
+    class Spy:
+        def __init__(self):
+            self.forgotten = []
+
+        def forget_user(self, uid):
+            self.forgotten.append(uid)
+
+    spy = Spy()
+    repo = FakeRepo()
+
+    @contextmanager
+    def repo_cm():
+        yield repo
+
+    services = Services(
+        repo_cm,
+        lambda r: FakeAnswerer(),
+        lambda r: WebRetriever(),
+        auth_required=True,
+        tracer=lambda: spy,
+    )
+    client = TestClient(create_app(services, LoginLimiter()))
+    pw = "correct horse battery"
+    client.post("/api/auth/signup", json={"email": "a@b.co", "password": pw})
+    wrong = client.request("DELETE", "/api/account", json={"password": "wrong pw 12"})
+    assert wrong.status_code == 401
+    assert spy.forgotten == []  # 비밀번호가 틀리면 지우지 않는다
+    r = client.request("DELETE", "/api/account", json={"password": pw})
+    assert r.status_code == 200 and spy.forgotten == [1]
+
+
+def test_account_delete_succeeds_even_if_trace_deletion_breaks():
+    class Broken:
+        def forget_user(self, uid):
+            raise RuntimeError("langfuse down")
+
+    repo = FakeRepo()
+
+    @contextmanager
+    def repo_cm():
+        yield repo
+
+    services = Services(
+        repo_cm,
+        lambda r: FakeAnswerer(),
+        lambda r: WebRetriever(),
+        auth_required=True,
+        tracer=lambda: Broken(),
+    )
+    client = TestClient(create_app(services))
+    pw = "correct horse battery"
+    client.post("/api/auth/signup", json={"email": "a@b.co", "password": pw})
+    assert client.request("DELETE", "/api/account", json={"password": pw}).status_code == 200
+    assert repo.users == {}
+
+
 @respx.mock
 def test_langfuse_trace_of_streamed_answer():
     route = respx.post("http://lf/api/public/otel/v1/traces").mock(
         return_value=httpx.Response(200, json={})
     )
-    tracer = LangfuseTracer("http://lf", "pk", "sk", background=False, release="1.0")
+    tracer = LangfuseTracer(
+        "http://lf", "pk", "sk", background=False, release="1.0", pseudonym_key=KEY
+    )
     answerer = Answerer(FakeRetriever(HITS), StreamLLM(""), tracer=tracer)
     events = list(answerer.stream("DS 매출은?", user_id=7, session_id=42))
     assert events[-1][0] == "done"
@@ -156,7 +289,11 @@ def test_langfuse_trace_of_streamed_answer():
     assert {s["traceId"] for s in spans} == {root["traceId"]}
 
     r = attrs(root)
-    assert r["user.id"] == "7" and r["session.id"] == "42"
+    # 사용자·대화 번호는 그대로 보내지 않고 가명으로
+    assert r["user.id"] == pseudonym(KEY.encode(), "user", 7)
+    assert r["session.id"] == pseudonym(KEY.encode(), "session", 42)
+    assert r["user.id"].startswith("u_") and r["session.id"].startswith("s_")
+    assert b'"stringValue": "7"' not in request.content.replace(b'":"', b'": "')
     assert r["langfuse.trace.input"] == "DS 매출은?" and r["langfuse.release"] == "1.0"
     assert r["langfuse.trace.output"] == "DS 매출은 111조원입니다 [1]."
     assert json.loads(r["langfuse.observation.metadata"])["cited"] == [1]

@@ -329,6 +329,15 @@ docker compose --profile monitoring stop prometheus grafana
 
 `.env`를 고친 뒤 `docker compose up -d`로 다시 띄우면 적용됩니다.
 
+### 개인정보: 가명과 보관 기간
+
+Langfuse에는 질문, 근거 원문, 답변이 그대로 남습니다. 그래서 아래처럼 다룹니다.
+
+- **가명**: 사용자 번호와 대화 번호는 그대로 보내지 않고, `SECRET_KEY`로 만든 HMAC 가명(`u_…`, `s_…`)으로 바꿔 보냅니다. Langfuse만 봐서는 누구의 질문인지 알 수 없고, 같은 사용자의 질문끼리만 묶입니다. `SECRET_KEY`가 비어 있으면 실행할 때마다 새 키를 써서, 서버를 다시 켜면 같은 사용자라도 다른 가명이 됩니다. `SECRET_KEY`를 바꾸면 그 전 기록과 연결이 끊깁니다.
+- **보관 기간 30일 (꼭 설정)**: 보관 기간은 이 서비스가 아니라 Langfuse 프로젝트 설정에서 정합니다. Langfuse 화면의 프로젝트 설정 → 데이터 보관(Data Retention)에서 **30일**로 두세요. 개인정보처리방침의 "LLM 추적 기록 30일"과 같아야 합니다. 직접 띄운 Langfuse에서 이 메뉴가 없는 판이면, Langfuse DB(ClickHouse)의 오래된 기록을 30일마다 지우는 작업을 따로 걸어야 합니다.
+- **탈퇴할 때 삭제 요청**: 탈퇴하면 응답을 보낸 뒤 그 사용자 가명의 추적을 Langfuse 공개 API로 찾아(`GET /api/public/traces?userId=`) 지우도록(`DELETE /api/public/traces`) 요청합니다. 실패해도 탈퇴는 그대로 끝나고, 로그에는 HTTP 상태만 남깁니다. 추적 목록 API는 Langfuse v4에서 빠질 예정이라, 그 판에서는 삭제 요청이 실패하고 가명과 30일 보관 기간에만 기댑니다. 끄려면 `LANGFUSE_DELETE_ON_ACCOUNT_DELETE=false`. Langfuse API 키는 삭제 권한이 있는 프로젝트 키여야 합니다.
+- Langfuse Cloud를 쓰면 질문이 Langfuse 회사 서버로 갑니다. 개인정보처리방침의 "처리 위탁"에 Langfuse를 적어야 합니다. 직접 띄우면 그럴 필요가 없습니다.
+
 ## 12. Ollama를 컨테이너로
 
 서버에 Ollama를 설치하지 않고 컨테이너로 띄우는 방법입니다. CPU로만 돌아 느립니다. `.env`에서 주소를 바꿉니다.

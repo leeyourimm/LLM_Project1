@@ -10,9 +10,16 @@ SDK 없이 Langfuse 의 OpenTelemetry 수집 주소(/api/public/otel/v1/traces)�
 보낸다. 질문 하나가 trace 하나이고, 그 아래에 검색(span)과 답변 생성(generation)이 붙는다.
 보낼 내용을 큐에 쌓아 두고 별도 스레드가 묶어서 보내므로 답변 속도에 영향을 주지 않고,
 Langfuse 가 꺼져 있어도 답변은 그대로 나간다.
+
+개인정보: 사용자 번호와 대화 번호는 그대로 보내지 않고 서버 비밀값(SECRET_KEY)으로 만든
+HMAC 가명(u_…, s_…)으로 바꿔 보낸다. Langfuse 만 봐서는 누구의 질문인지 알 수 없고, 같은
+사용자의 질문끼리만 묶인다. 탈퇴하면 forget_user 가 그 가명의 추적을 지우도록 요청하고
+(가능할 때만), 남은 것도 Langfuse 프로젝트의 보관 기간(30일)이 지나면 사라진다.
 """
 
 import atexit
+import hashlib
+import hmac
 import json
 import logging
 import queue
@@ -29,6 +36,14 @@ MAX_QUEUE = 2000
 BATCH = 50
 FLUSH_SECONDS = 2.0
 MAX_TEXT = 20_000  # 한 항목에 넣는 글자 수 (근거 원문이 길다)
+FORGET_PAGES = 50  # 탈퇴 시 찾아 지울 추적 목록 쪽수 (한 쪽 100건)
+FORGET_CHUNK = 1000  # Langfuse 가 한 번에 지우는 최대 개수
+
+
+def pseudonym(key: bytes, kind: str, value) -> str:
+    """사용자·대화 번호를 되돌릴 수 없는 가명으로. kind 가 다르면 같은 번호도 다른 값이 된다."""
+    digest = hmac.new(key, f"{kind}:{value}".encode(), hashlib.sha256).hexdigest()
+    return f"{kind[0]}_{digest[:32]}"
 
 
 def _now() -> datetime:
@@ -72,6 +87,9 @@ class Tracer:
 
     def flush(self) -> None:
         pass
+
+    def forget_user(self, user_id) -> None:
+        """탈퇴한 사용자의 추적을 지운다 (가능한 경우에만, 실패해도 조용히 넘어간다)."""
 
 
 NOOP = Tracer()
@@ -204,7 +222,19 @@ class LangfuseTracer(Tracer):
         environment: str | None = None,
         client: httpx.Client | None = None,
         background: bool = True,
+        pseudonym_key: str = "",
+        delete_on_forget: bool = True,
     ):
+        if pseudonym_key:
+            self._key = pseudonym_key.encode()
+        else:
+            # 비밀값이 없으면 실행할 때마다 새 키를 쓴다: 다시 켜면 같은 사용자끼리 묶이지 않지만
+            # 원래 번호를 짐작할 수는 없다
+            import secrets
+
+            self._key = secrets.token_bytes(32)
+            log.warning("SECRET_KEY 가 없어 Langfuse 사용자 가명이 실행마다 바뀝니다")
+        self.delete_on_forget = delete_on_forget
         self.sample_rate = sample_rate
         self.release = release
         self.environment = environment
@@ -226,12 +256,55 @@ class LangfuseTracer(Tracer):
             "langfuse.trace.input": input,
             "langfuse.observation.input": input,
             "langfuse.trace.metadata": metadata,
-            "user.id": str(user_id) if user_id is not None else None,
-            "session.id": str(session_id) if session_id is not None else None,
+            "user.id": self.user_pseudonym(user_id),
+            "session.id": (
+                pseudonym(self._key, "session", session_id) if session_id is not None else None
+            ),
             "langfuse.release": self.release,
             "langfuse.environment": self.environment,
         }
         return LangfuseTrace(self, name, attrs)
+
+    def user_pseudonym(self, user_id) -> str | None:
+        return pseudonym(self._key, "user", user_id) if user_id is not None else None
+
+    def forget_user(self, user_id) -> None:
+        """그 사용자 가명으로 남은 추적을 찾아 지우도록 Langfuse 에 요청한다.
+
+        Langfuse 공개 API 에는 사용자 기준 삭제가 없어, 추적 목록(GET /api/public/traces?userId=)
+        에서 번호를 모은 뒤 여러 건 삭제(DELETE /api/public/traces, traceIds 최대 1000개)를 부른다.
+        목록 API 는 Langfuse v4 에서 빠질 예정이라, 없으면(404 등) 기록만 남기고 보관 기간에 맡긴다.
+        내용(질문, 이메일)은 로그에 남기지 않는다.
+        """
+        if not self.delete_on_forget or user_id is None:
+            return
+        user = self.user_pseudonym(user_id)
+        try:
+            self.flush()  # 아직 보내지 않은 이 사용자 추적이 삭제 뒤에 도착하지 않게
+            ids: list[str] = []
+            for page in range(1, FORGET_PAGES + 1):
+                resp = self._client.get(
+                    "/api/public/traces",
+                    params={"userId": user, "fields": "core", "limit": 100, "page": page},
+                )
+                if resp.status_code >= 400:
+                    log.warning("Langfuse 추적 목록 조회 실패: HTTP %s", resp.status_code)
+                    return
+                body = resp.json()
+                ids += [t["id"] for t in body.get("data", []) if t.get("id")]
+                if page >= int(body.get("meta", {}).get("totalPages") or 0):
+                    break
+            for i in range(0, len(ids), FORGET_CHUNK):
+                resp = self._client.request(
+                    "DELETE", "/api/public/traces", json={"traceIds": ids[i : i + FORGET_CHUNK]}
+                )
+                if resp.status_code >= 400:
+                    log.warning("Langfuse 추적 삭제 실패: HTTP %s", resp.status_code)
+                    return
+            if ids:
+                log.info("탈퇴한 사용자의 Langfuse 추적 %d건 삭제 요청", len(ids))
+        except (httpx.HTTPError, ValueError, TypeError, KeyError) as e:
+            log.warning("Langfuse 추적 삭제 중 오류: %s", type(e).__name__)
 
     def emit(self, span: dict) -> None:
         span["attributes"] = [
@@ -309,6 +382,8 @@ def get_tracer(settings) -> Tracer:
                 sample_rate=settings.langfuse_sample_rate,
                 release=__version__,
                 environment=settings.environment,
+                pseudonym_key=settings.secret_key,
+                delete_on_forget=settings.langfuse_delete_on_account_delete,
             )
         else:
             _tracer = NOOP
