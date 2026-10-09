@@ -650,8 +650,8 @@ def eval_run(
     settings = get_settings()
     cases = load_cases(*files)[:limit]
     backends, _, repo = _context(None, None, None)
-    # 평가는 매번 실제로 답을 만들어야 하므로 캐시를 쓰지 않는다
-    answerer = build_answerer(backends, repo, use_cache=False)
+    # 평가는 매번 기본 모델로 실제로 답을 만들어야 하므로 캐시와 대체 모델을 쓰지 않는다
+    answerer = build_answerer(backends, repo, use_cache=False, use_fallback=False)
 
     def progress(i, g):
         mark = "통과" if g.passed else "실패: " + "; ".join(g.reasons)

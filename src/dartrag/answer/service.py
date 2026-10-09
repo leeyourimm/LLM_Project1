@@ -7,6 +7,7 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Protocol
 
+from dartrag.answer.gateway import last_call
 from dartrag.answer.guard import check_question
 from dartrag.answer.llm import _THINK_RE, LLM
 from dartrag.answer.numbers import split_sentences, unverified_numbers
@@ -37,6 +38,7 @@ class Answer:
     warnings: list[str] = field(default_factory=list)
     refused: str | None = None  # advice / injection: 정책상 답하지 않은 질문
     cached: bool = False
+    model: str | None = None  # 실제로 답한 모델 (대체 모델이 답했으면 그 이름)
 
 
 class FinanceLookup(Protocol):
@@ -46,9 +48,13 @@ class FinanceLookup(Protocol):
 class _Run:
     """질문 하나의 단계별 시간과 추적 기록."""
 
-    def __init__(self, tracer: Tracer, question: str, flt: SearchFilter, user_id, session_id):
+    def __init__(
+        self, tracer: Tracer, question: str, flt: SearchFilter, user_id, session_id, model: str
+    ):
         self.started = time.monotonic()
         self.timings: dict[str, float] = {}
+        self.model = model  # 답한 모델. 게이트웨이가 대체 모델로 답하면 바뀐다
+        self.fallback = False
         self.trace = tracer.trace(
             "answer",
             input=question,
@@ -80,9 +86,11 @@ class _Run:
             ],
         )
 
-    def finish(self, result: "Answer", model: str, usage: dict | None) -> "Answer":
+    def finish(self, result: "Answer", usage: dict | None) -> "Answer":
         self.timings["total"] = time.monotonic() - self.started
-        metrics.record_answer(result, self.timings, usage, model)
+        if result.model is None:
+            result.model = self.model
+        metrics.record_answer(result, self.timings, usage, result.model)
         self.trace.end(
             output=result.text,
             metadata={
@@ -145,18 +153,29 @@ class Answerer:
     def _generation(self, run: _Run, messages, text, start, t0, first_token=None, error=None):
         run.timings["generate"] = time.monotonic() - t0
         usage = self._usage()
+        # 게이트웨이를 거쳤으면 실제로 답한 모델과 재시도·대체 기록을 함께 남긴다
+        call = last_call(self.llm)
+        if call:
+            run.model, run.fallback = call.model, call.fallback
         run.trace.generation(
             "generate",
             start,
             datetime.now(UTC),
-            model=self.llm.name,
+            model=run.model,
             input=[{"role": m.role, "content": m.content} for m in messages],
             output=text,
             usage=usage,
             first_token=first_token,
+            metadata=call.metadata() if call else None,
             level="ERROR" if error else None,
         )
         return usage
+
+    def _remember(self, run: _Run, question: str, flt: SearchFilter, result: Answer) -> None:
+        # 대체 모델의 답은 캐시에 넣지 않는다. 기본 모델 이름으로 저장되어 기본 모델이
+        # 돌아온 뒤에도 한동안 대체 모델의 답이 나가게 된다
+        if self.cache and not run.fallback:
+            self.cache.put(question, flt, result)
 
     def answer(
         self,
@@ -167,9 +186,9 @@ class Answerer:
         session_id=None,
     ) -> Answer:
         flt = flt or SearchFilter()
-        run = _Run(self.tracer, question, flt, user_id, session_id)
+        run = _Run(self.tracer, question, flt, user_id, session_id, self.llm.name)
         if early := self._precheck(question, flt):
-            return run.finish(early, self.llm.name, None)
+            return run.finish(early, None)
         usage = None
         try:
             hits = self._retrieve(run, question, flt)
@@ -188,9 +207,8 @@ class Answerer:
         except Exception as e:
             run.failed(e)
             raise
-        if self.cache:
-            self.cache.put(question, flt, result)
-        return run.finish(result, self.llm.name, usage)
+        self._remember(run, question, flt, result)
+        return run.finish(result, usage)
 
     def stream(
         self,
@@ -202,12 +220,12 @@ class Answerer:
     ) -> Iterator[tuple]:
         """("sources", hits) → ("token", 조각)… → ("done", Answer) 순서로 낸다."""
         flt = flt or SearchFilter()
-        run = _Run(self.tracer, question, flt, user_id, session_id)
+        run = _Run(self.tracer, question, flt, user_id, session_id, self.llm.name)
         if early := self._precheck(question, flt):
             if early.hits:
                 yield ("sources", early.hits)
             yield ("token", early.text)
-            yield ("done", run.finish(early, self.llm.name, None))
+            yield ("done", run.finish(early, None))
             return
         try:
             hits = self._retrieve(run, question, flt)
@@ -216,9 +234,8 @@ class Answerer:
             raise
         if not hits:
             result = Answer(question, NOT_FOUND, found=False)
-            if self.cache:
-                self.cache.put(question, flt, result)
-            yield ("done", run.finish(result, self.llm.name, None))
+            self._remember(run, question, flt, result)
+            yield ("done", run.finish(result, None))
             return
         yield ("sources", hits)
         messages = build_messages(question, hits)
@@ -243,9 +260,8 @@ class Answerer:
         text = _THINK_RE.sub("", "".join(parts)).strip()
         usage = self._generation(run, messages, text, start, t0, first_token)
         result = check_citations(Answer(question, text, hits=hits))
-        if self.cache:
-            self.cache.put(question, flt, result)
-        yield ("done", run.finish(result, self.llm.name, usage))
+        self._remember(run, question, flt, result)
+        yield ("done", run.finish(result, usage))
 
 
 def check_citations(answer: Answer) -> Answer:
