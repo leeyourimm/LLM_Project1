@@ -25,7 +25,7 @@ class EvalCase:
     expected_numbers: list[str] = field(default_factory=list)  # "300조 8,709억원", "16.2%"
     expected_keywords: list[str] = field(default_factory=list)
     expected_sources: list[ExpectedSource] = field(default_factory=list)
-    source: str = "manual"  # manual / generated
+    source: str = "manual"  # manual / generated / feedback
     note: str | None = None
 
     @classmethod

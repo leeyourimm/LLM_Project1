@@ -581,5 +581,41 @@ def user_remove(email: str):
     typer.echo(f"{email} {'삭제' if removed else '없는 계정'}")
 
 
+feedback_app = typer.Typer(help="사용자 답변 평가")
+app.add_typer(feedback_app, name="feedback")
+
+
+@feedback_app.command("stats")
+def feedback_stats():
+    """👍/👎 개수와 👎 사유별 개수."""
+    from collections import Counter
+
+    from dartrag.eval.feedback import REASON_LABEL
+
+    rows = Repository.connect(get_settings().database_url).feedback_rows()
+    if not rows:
+        typer.echo("아직 평가가 없습니다.")
+        return
+    up = sum(1 for r in rows if r["rating"] == 1)
+    typer.echo(f"👍 {up}  👎 {len(rows) - up}  (👍 비율 {up / len(rows):.0%})")
+    for reason, n in Counter(r["reason"] for r in rows if r["rating"] == -1).most_common():
+        typer.echo(f"  {REASON_LABEL.get(reason or '', '사유 없음')}: {n}")
+
+
+@feedback_app.command("export")
+def feedback_export(out: Path = Path("eval/feedback_candidates.jsonl")):
+    """👎 받은 질문을 평가셋 후보로 저장 (정답은 원문을 보고 직접 채운 뒤 manual.jsonl 로 옮김)."""
+    from dartrag.eval import save_cases
+    from dartrag.eval.feedback import feedback_to_cases
+
+    rows = Repository.connect(get_settings().database_url).feedback_rows(rating=-1)
+    cases = feedback_to_cases(rows)
+    if not cases:
+        typer.echo("👎 평가가 없습니다.")
+        return
+    save_cases(out, cases)
+    typer.echo(f"{len(cases)}문항 → {out}")
+
+
 if __name__ == "__main__":
     app()

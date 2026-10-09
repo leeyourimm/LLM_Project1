@@ -1,10 +1,11 @@
 """질문 → 하이브리드 검색 → LLM 답변 → 인용 검증."""
 
 import re
+from collections.abc import Iterator
 from dataclasses import dataclass, field
 from typing import Protocol
 
-from dartrag.answer.llm import LLM
+from dartrag.answer.llm import _THINK_RE, LLM
 from dartrag.answer.numbers import split_sentences, unverified_numbers
 from dartrag.answer.prompt import NOT_FOUND, build_messages
 from dartrag.search import HybridRetriever, SearchFilter, SearchHit
@@ -49,16 +50,37 @@ class Answerer:
         self.finance = finance
         self.top_k = top_k
 
-    def answer(self, question: str, flt: SearchFilter | None = None) -> Answer:
+    def retrieve(self, question: str, flt: SearchFilter | None = None) -> list[SearchHit]:
         # 재무 수치 질문이면 재무 DB 조회·계산 결과를 첫 번째 출처로 넣는다
         fin = self.finance.lookup(question, flt) if self.finance else None
         hits = self.retriever.search(question, flt, self.top_k - (1 if fin else 0))
-        if fin:
-            hits = [fin, *hits]
+        return [fin, *hits] if fin else hits
+
+    def answer(self, question: str, flt: SearchFilter | None = None) -> Answer:
+        hits = self.retrieve(question, flt)
         if not hits:
             return Answer(question, NOT_FOUND, found=False)
         text = self.llm.chat(build_messages(question, hits))
         return check_citations(Answer(question, text, hits=hits))
+
+    def stream(self, question: str, flt: SearchFilter | None = None) -> Iterator[tuple]:
+        """("sources", hits) → ("token", 조각)… → ("done", Answer) 순서로 낸다."""
+        hits = self.retrieve(question, flt)
+        if not hits:
+            yield ("done", Answer(question, NOT_FOUND, found=False))
+            return
+        yield ("sources", hits)
+        messages = build_messages(question, hits)
+        parts: list[str] = []
+        if hasattr(self.llm, "stream"):
+            for piece in self.llm.stream(messages):
+                parts.append(piece)
+                yield ("token", piece)
+        else:
+            parts.append(self.llm.chat(messages))
+            yield ("token", parts[0])
+        text = _THINK_RE.sub("", "".join(parts)).strip()
+        yield ("done", check_citations(Answer(question, text, hits=hits)))
 
 
 def check_citations(answer: Answer) -> Answer:

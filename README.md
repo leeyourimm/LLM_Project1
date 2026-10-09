@@ -114,6 +114,8 @@ dartrag ask "2024년 HBM 매출 비중은?" -s 005930
 
 - **회사 대시보드** (웹 "회사" 탭, `GET /api/company/{종목코드}`): 최근 연도 핵심 지표와 전년 대비 변화, 연도별 매출·이익 막대 차트, 이익률 꺾은선 차트(표로 보기 포함), 최근 90일 공시, 최근 사업보고서 변경점 요약. 숫자는 질문 답변과 같은 계정 선택 규칙을 씀
 - **로그인** (`web/auth.py`, `AUTH_REQUIRED=true`일 때만): 가입·로그인·로그아웃·비밀번호 변경, 사용자별 관심 종목, 로그인 시도 제한, 다른 사이트에서 보낸 요청 차단, 보안 헤더(CSP 등). 관리 명령 `dartrag user add/password/list/remove`
+- **대화** (`answer/conversation.py`, `web/chat.py`): "그럼 전년은?", "SK하이닉스는?"처럼 이어지는 질문의 회사·연도·주제를 앞 질문에서 이어받아 완전한 질문으로 바꾸고, 어떻게 해석했는지 응답에 함께 돌려줌. 질문 속 회사로 검색 범위를 좁혀 다른 회사 문서가 섞이지 않게 함. 대화 기록 저장·조회·삭제(로그인하면 사용자별). `POST /api/ask/stream`은 답변을 만들어지는 대로 보내는 스트리밍(Server-Sent Events)
+- **답변 평가** (`POST /api/messages/{id}/feedback`): 👍/👎와 사유(숫자 틀림, 출처 틀림, 못 찾음 등). `dartrag feedback stats`로 집계, `dartrag feedback export`로 👎 질문을 평가셋 후보로 내보냄
 - **준비 점검과 일괄 실행** (`dartrag doctor`, `dartrag run`): 위 "한 번에 실행하기" 참고. 인증키는 화면에 출력하지 않음
 
 ## 알려진 제한

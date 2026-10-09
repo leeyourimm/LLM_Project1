@@ -489,3 +489,129 @@ class Repository:
             (rcept_no, channel),
         )
         self.conn.commit()
+
+    # --- 대화 기록 -------------------------------------------------------
+    # user_id 가 None 이면 로그인 없이 쓰는 운영자 본인의 대화
+
+    def create_conversation(self, user_id: int | None, title: str) -> int:
+        row = self.conn.execute(
+            "INSERT INTO conversations (user_id, title) VALUES (%s, %s) RETURNING id",
+            (user_id, title[:100]),
+        ).fetchone()
+        self.conn.commit()
+        return row[0]
+
+    def owns_conversation(self, conversation_id: int, user_id: int | None) -> bool:
+        row = self.conn.execute(
+            "SELECT 1 FROM conversations WHERE id = %s AND user_id IS NOT DISTINCT FROM %s",
+            (conversation_id, user_id),
+        ).fetchone()
+        return row is not None
+
+    def add_message(self, conversation_id: int, role: str, content: str, payload: dict) -> int:
+        from psycopg.types.json import Jsonb
+
+        row = self.conn.execute(
+            """INSERT INTO messages (conversation_id, role, content, payload)
+               VALUES (%s, %s, %s, %s) RETURNING id""",
+            (conversation_id, role, content, Jsonb(payload)),
+        ).fetchone()
+        self.conn.execute(
+            "UPDATE conversations SET updated_at = now() WHERE id = %s", (conversation_id,)
+        )
+        self.conn.commit()
+        return row[0]
+
+    def conversations(self, user_id: int | None, limit: int = 50) -> list[dict]:
+        cur = self.conn.execute(
+            """SELECT id, title, created_at, updated_at FROM conversations
+               WHERE user_id IS NOT DISTINCT FROM %s ORDER BY updated_at DESC LIMIT %s""",
+            (user_id, limit),
+        )
+        cols = [c.name for c in cur.description]
+        return [dict(zip(cols, r, strict=True)) for r in cur.fetchall()]
+
+    def messages(self, conversation_id: int) -> list[dict]:
+        cur = self.conn.execute(
+            """SELECT m.id, m.role, m.content, m.payload, m.created_at,
+                      f.rating, f.reason
+               FROM messages m LEFT JOIN feedback f ON f.message_id = m.id
+               WHERE m.conversation_id = %s ORDER BY m.id""",
+            (conversation_id,),
+        )
+        cols = [c.name for c in cur.description]
+        return [dict(zip(cols, r, strict=True)) for r in cur.fetchall()]
+
+    def last_context(self, conversation_id: int) -> dict | None:
+        row = self.conn.execute(
+            """SELECT payload->'context' FROM messages
+               WHERE conversation_id = %s AND role = 'user' ORDER BY id DESC LIMIT 1""",
+            (conversation_id,),
+        ).fetchone()
+        return row[0] if row else None
+
+    def delete_conversation(self, conversation_id: int, user_id: int | None) -> bool:
+        cur = self.conn.execute(
+            "DELETE FROM conversations WHERE id = %s AND user_id IS NOT DISTINCT FROM %s",
+            (conversation_id, user_id),
+        )
+        self.conn.commit()
+        return cur.rowcount > 0
+
+    def purge_conversations(self, older_than_days: int) -> int:
+        """보관 기간이 지난 대화 삭제."""
+        cur = self.conn.execute(
+            "DELETE FROM conversations WHERE updated_at < now() - make_interval(days => %s)",
+            (older_than_days,),
+        )
+        self.conn.commit()
+        return cur.rowcount
+
+    def set_feedback(
+        self,
+        message_id: int,
+        user_id: int | None,
+        rating: int,
+        reason: str | None,
+        comment: str | None,
+    ) -> bool:
+        """자기 대화의 답변에만 평가를 남길 수 있다."""
+        owned = self.conn.execute(
+            """SELECT 1 FROM messages m JOIN conversations c ON c.id = m.conversation_id
+               WHERE m.id = %s AND m.role = 'assistant'
+                 AND c.user_id IS NOT DISTINCT FROM %s""",
+            (message_id, user_id),
+        ).fetchone()
+        if not owned:
+            return False
+        self.conn.execute(
+            """INSERT INTO feedback (message_id, rating, reason, comment)
+               VALUES (%s, %s, %s, %s)
+               ON CONFLICT (message_id) DO UPDATE SET rating = EXCLUDED.rating,
+                 reason = EXCLUDED.reason, comment = EXCLUDED.comment, created_at = now()""",
+            (message_id, rating, reason, comment),
+        )
+        self.conn.commit()
+        return True
+
+    def feedback_rows(self, rating: int | None = None) -> list[dict]:
+        """평가와 그 답변, 바로 앞 질문 (평가셋 편입용)."""
+        query = """
+            SELECT f.message_id, f.rating, f.reason, f.comment, f.created_at,
+                   a.content AS answer, a.payload AS answer_payload,
+                   q.content AS question, q.payload AS question_payload
+            FROM feedback f
+            JOIN messages a ON a.id = f.message_id
+            JOIN LATERAL (
+                SELECT content, payload FROM messages
+                WHERE conversation_id = a.conversation_id AND role = 'user' AND id < a.id
+                ORDER BY id DESC LIMIT 1
+            ) q ON true
+        """
+        params: tuple = ()
+        if rating is not None:
+            query += " WHERE f.rating = %s"
+            params = (rating,)
+        cur = self.conn.execute(query + " ORDER BY f.created_at", params)
+        cols = [c.name for c in cur.description]
+        return [dict(zip(cols, r, strict=True)) for r in cur.fetchall()]

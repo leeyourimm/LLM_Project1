@@ -18,8 +18,9 @@ pytestmark = pytest.mark.skipif(not URL, reason="TEST_DATABASE_URL 없음")
 def repo():
     conn = psycopg.connect(URL)
     conn.execute(
-        "DROP TABLE IF EXISTS sessions, user_watchlist, users, notifications, watchlist, "
-        "disclosures, chunks, financial_items, filings, companies CASCADE"
+        "DROP TABLE IF EXISTS feedback, messages, conversations, sessions, user_watchlist, "
+        "users, notifications, watchlist, disclosures, chunks, financial_items, filings, "
+        "companies CASCADE"
     )
     conn.commit()
     r = Repository(conn)
@@ -308,3 +309,41 @@ def test_users_sessions_and_user_watchlist(repo):
     repo.set_watch("00126380", 2, uid)
     assert repo.remove_user("a@b.co") and repo.users() == []
     assert repo.session_user("d" * 64) is None
+
+
+def test_conversations_messages_feedback(repo):
+    from dartrag.eval.feedback import feedback_to_cases
+
+    uid = repo.create_user("a@b.co", "h")
+    mine = repo.create_conversation(None, "삼성전자 2024년 영업이익은?")
+    theirs = repo.create_conversation(uid, "다른 사람 대화")
+    assert repo.owns_conversation(mine, None) and not repo.owns_conversation(mine, uid)
+    assert not repo.owns_conversation(theirs, None)
+
+    ctx = {"corp_codes": ["00126380"], "years": [2024], "topic": "영업이익"}
+    q = repo.add_message(
+        mine,
+        "user",
+        "그럼 전년은?",
+        {"resolved_question": "삼성전자 2023년 영업이익?", "context": ctx},
+    )
+    a = repo.add_message(mine, "assistant", "6조 5,670억원입니다 [1].", {"sources": []})
+    assert repo.last_context(mine) == ctx and repo.last_context(theirs) is None
+    assert [c["id"] for c in repo.conversations(None)] == [mine]
+
+    assert not repo.set_feedback(q, None, -1, None, None)  # 질문에는 평가 불가
+    assert not repo.set_feedback(a, uid, -1, None, None)  # 남의 대화
+    assert repo.set_feedback(a, None, 1, None, None)
+    assert repo.set_feedback(a, None, -1, "wrong_number", "단위 틀림")  # 다시 누르면 바뀜
+    msgs = repo.messages(mine)
+    assert msgs[1]["rating"] == -1 and msgs[1]["reason"] == "wrong_number"
+
+    rows = repo.feedback_rows(rating=-1)
+    assert len(rows) == 1 and rows[0]["question"] == "그럼 전년은?"
+    [case] = feedback_to_cases(rows)
+    assert case.question == "삼성전자 2023년 영업이익?" and case.category == "numeric"
+    assert case.corp_codes == ["00126380"] and "단위 틀림" in case.note
+
+    assert repo.purge_conversations(30) == 0
+    assert repo.delete_conversation(mine, None) and repo.feedback_rows() == []
+    assert not repo.delete_conversation(theirs, None)
