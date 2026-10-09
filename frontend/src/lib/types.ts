@@ -9,7 +9,11 @@ export interface Company {
 export interface AuthInfo {
   auth_required: boolean;
   allow_signup: boolean;
-  user: { id: number; email: string } | null;
+  // 서버에 메일 발송(SMTP)이 설정됐는지: 비밀번호 재설정, 이메일 인증에 필요
+  email_enabled?: boolean;
+  // 가입 이메일을 인증해야 이메일 알림을 켤 수 있는지
+  email_verification_required?: boolean;
+  user: { email: string; email_verified?: boolean } | null;
 }
 
 export interface Source {
@@ -168,6 +172,8 @@ export interface AlertSettings {
   per_user: boolean;
   available: { email: boolean; telegram: boolean };
   channels: AlertChannel[];
+  // 가입 이메일 인증 전이라 이메일 알림을 켤 수 없음
+  email_needs_verification?: boolean;
 }
 
 export const METRIC_LABEL: Record<string, string> = {

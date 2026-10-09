@@ -22,7 +22,7 @@ export function Providers({ children }: { children: React.ReactNode }) {
       setAuth(await api<AuthInfo>("/api/auth/me"));
     } catch {
       // 서버가 잠시 안 될 때는 로그인 없이 쓰는 것으로 본다
-      setAuth({ auth_required: false, allow_signup: false, user: null });
+      setAuth({ auth_required: false, allow_signup: false, email_enabled: false, user: null });
     }
   }, []);
 

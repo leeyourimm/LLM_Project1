@@ -1,5 +1,6 @@
 "use client";
 
+import Link from "next/link";
 import { useCallback, useEffect, useState } from "react";
 import { ErrorBox } from "@/components/ui";
 import { api, del, patch, post } from "@/lib/api";
@@ -55,7 +56,11 @@ export function AlertSettings() {
               <span className="font-medium">{LABEL[kind]}</span>
               <span className="text-muted">· {stateOf(kind, s, ch)}</span>
               <span className="flex-1" />
-              {s.available[kind] && (!ch || !ch.verified) ? (
+              {kind === "email" && s.email_needs_verification && (!ch || !ch.verified) ? (
+                <Link className="link" href="/account">
+                  가입 이메일을 먼저 인증하세요
+                </Link>
+              ) : s.available[kind] && (!ch || !ch.verified) ? (
                 <button
                   type="button"
                   className="btn"
