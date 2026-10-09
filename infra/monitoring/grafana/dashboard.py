@@ -297,6 +297,42 @@ p["fieldConfig"]["defaults"]["thresholds"] = thresholds(
 )
 p["fieldConfig"]["defaults"]["min"] = 0
 p["fieldConfig"]["defaults"]["max"] = 1
+next_row()
+
+# 기업 대시보드 캐시: 작업자가 미리 만들어 두면 적중률이 높고,
+# 요청 중에 만드는 시간은 드물게만 찍힌다
+panel(
+    "timeseries",
+    "기업 대시보드 캐시 적중률",
+    [
+        (
+            'sum by (view) (rate(dartrag_dashboard_cache_total{result="hit"}[15m])) / '
+            "clamp_min(sum by (view) (rate(dartrag_dashboard_cache_total[15m])), 1e-9)",
+            "{{view}}",
+        )
+    ],
+    0,
+    12,
+    unit="percentunit",
+    desc=(
+        "hit: 미리 만들어 둔 것을 줌, miss: 요청 중에 만듦, "
+        "error: 캐시 저장소 오류로 메모리 캐시를 씀"
+    ),
+)
+panel(
+    "timeseries",
+    "캐시에 없을 때 대시보드 만드는 시간 (p95)",
+    [
+        (
+            "histogram_quantile(0.95, sum by (le, view) "
+            "(rate(dartrag_dashboard_build_seconds_bucket[15m])))",
+            "{{view}}",
+        )
+    ],
+    12,
+    12,
+    unit="s",
+)
 
 dashboard = {
     "uid": "dartrag",

@@ -22,6 +22,8 @@ HIT = SearchHit(
         "body": "DS 부문 매출은 111조원이다.",
         "unit": None,
         "url": "https://dart.fss.or.kr/dsaf001/main.do?rcpNo=20250311000001",
+        "rcept_no": "20250311000001",
+        "rcept_dt": date(2025, 3, 11),
     },
 )
 
@@ -39,6 +41,11 @@ class FakeRepo:
         self.verified = set()
         self.tokens = {}
         self.devices = {}
+        # 답변 신뢰도: 회사의 최신 정기공시 (None 이면 인용한 공시가 최신)
+        self.latest_filing = None
+        # 대시보드 캐시 무효화용 회사 데이터 버전
+        self.versions = {}
+        self.series_calls = 0
 
     def corp_codes_for_stocks(self, stocks):
         return ["00126380"] if "005930" in stocks else []
@@ -192,6 +199,25 @@ class FakeRepo:
     def company_by_stock(self, stock):
         return self.COMPANIES.get(stock)
 
+    def company_version(self, code):
+        return str(self.versions.get(code, 0))
+
+    def filing_freshness(self, rcept_nos):
+        cited = {
+            "rcept_no": "20250311000001",
+            "corp_code": "00126380",
+            "corp_name": "삼성전자",
+            "report_nm": "사업보고서 (2024.12)",
+            "rcept_dt": date(2025, 3, 11),
+        }
+        latest = self.latest_filing or {
+            "rcept_no": "20250311000001",
+            "report_nm": "사업보고서 (2024.12)",
+            "rcept_dt": date(2025, 3, 11),
+            "indexed": True,
+        }
+        return {no: cited | {"latest": latest} for no in rcept_nos if no == cited["rcept_no"]}
+
     def data_issues(self, corp_code=None, severity=None):
         return [
             {
@@ -208,6 +234,7 @@ class FakeRepo:
     def financial_rows(self, corp_codes, reprt_code, sj_divs, account_ids, account_names):
         from dartrag.finance import FinancialRow
 
+        self.series_calls += 1
         return [
             FinancialRow(code, y, "CFS", aid, "x", amt, f"rcpt{y}")
             for code in corp_codes
@@ -739,6 +766,51 @@ def test_ask_stream(ctx):
     done = events[-1][1]
     assert done["message_id"] and done["sources"][0]["cited"] is True
     assert "투자 권유" in done["disclaimer"]
+
+
+def test_answer_payload_has_passage_and_trust(ctx):
+    client, repo, _ = ctx
+    body = client.post("/api/ask", json={"question": "DS 매출은?"}).json()
+    src = body["sources"][0]
+    assert src["rcept_no"] == "20250311000001" and src["rcept_dt"] == "2025-03-11"
+    assert src["url"].endswith("rcpNo=20250311000001")  # DART 원문 링크는 그대로
+    # 넓힌 맥락이 없는 출처는 본문 전체가 인용 문단, 답변에 옮긴 숫자 위치는 본문 기준
+    assert src["context"] is None and src["highlight"] is None
+    [[a, b]] = src["quoted"]
+    assert src["body"][a:b] == "111조원"
+
+    trust = body["trust"]
+    assert (trust["sources"], trust["filings"], trust["numbers_checked"]) == (1, 1, 1)
+    assert trust["unverified_numbers"] == [] and trust["invalid_citations"] == []
+    assert trust["newest"]["age_days"] == (date.today() - date(2025, 3, 11)).days
+    assert trust["companies"][0]["is_latest"] is True
+
+    # 같은 회사의 더 최근 정기공시가 있으면 그 공시를 알려 준다
+    repo.latest_filing = {
+        "rcept_no": "20250814000002",
+        "report_nm": "반기보고서 (2025.06)",
+        "rcept_dt": date(2025, 8, 14),
+        "indexed": True,
+    }
+    again = client.post("/api/ask", json={"question": "DS 매출은?"}).json()
+    corp = again["trust"]["companies"][0]
+    assert corp["is_latest"] is False and corp["latest"]["rcept_dt"] == "2025-08-14"
+    # 대화 기록에도 답변 시점의 신뢰도가 저장된다 (JSON 으로 저장할 수 있는 값만)
+    msgs = client.get(f"/api/conversations/{again['conversation_id']}").json()["messages"]
+    stored = msgs[-1]["payload"]
+    json.dumps(stored)
+    assert stored["trust"] == again["trust"] and stored["sources"][0]["quoted"] == [[a, b]]
+
+
+def test_stream_sources_carry_passage_before_the_answer(ctx):
+    client, *_ = ctx
+    events = sse_events(client.post("/api/ask/stream", json={"question": "DS 매출은?"}).text)
+    sources = next(d for e, d in events if e == "sources")["sources"]
+    # 답변 전에는 무엇을 인용할지 모르므로 cited, quoted 가 없다
+    assert "cited" not in sources[0] and "quoted" not in sources[0]
+    assert "highlight" in sources[0] and sources[0]["rcept_dt"] == "2025-03-11"
+    done = events[-1][1]
+    assert done["trust"]["sources"] == 1 and done["sources"][0]["quoted"]
 
 
 def test_ask_stream_llm_error():

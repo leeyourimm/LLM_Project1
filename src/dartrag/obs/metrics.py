@@ -83,6 +83,19 @@ RATE_LIMITED = Counter(
     ["scope"],
     registry=REGISTRY,
 )
+DASHBOARD_CACHE = Counter(
+    "dartrag_dashboard_cache",
+    "기업 대시보드 캐시 조회 (view: company, quarters / result: hit, miss, error)",
+    ["view", "result"],
+    registry=REGISTRY,
+)
+DASHBOARD_BUILD_SECONDS = Histogram(
+    "dartrag_dashboard_build_seconds",
+    "캐시에 없어서 요청 중에 대시보드를 만든 시간",
+    ["view"],
+    buckets=SLOW_BUCKETS,
+    registry=REGISTRY,
+)
 
 
 def record_answer(result, timings: dict[str, float], usage: dict | None, model: str) -> None:

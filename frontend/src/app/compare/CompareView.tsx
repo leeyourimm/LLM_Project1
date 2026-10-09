@@ -5,6 +5,7 @@ import { useEffect, useState } from "react";
 import { BarChart, DataTable, LineChart, type Series } from "@/components/Chart";
 import { AnswerText } from "@/components/chat/AnswerText";
 import { SourceList } from "@/components/chat/SourceList";
+import { useSourcePanel } from "@/components/chat/useSourcePanel";
 import { CompanyInput } from "@/components/CompanyInput";
 import { toStock, useApp } from "@/components/providers";
 import { Empty, ErrorBox, Loading, PageTitle } from "@/components/ui";
@@ -48,7 +49,7 @@ export function CompareView() {
   const [summary, setSummary] = useState<Summary | null>(null);
   const [summaryBusy, setSummaryBusy] = useState(false);
   const [summaryError, setSummaryError] = useState<unknown>(null);
-  const [open, setOpen] = useState<number | null>(null);
+  const panel = useSourcePanel();
 
   const setStocks = (next: string[]) => router.replace(`/compare${next.length ? `?stocks=${next.join(",")}` : ""}`);
   const key = stocks.join(",");
@@ -217,11 +218,26 @@ export function CompareView() {
             ) : null}
             {summary ? (
               <div className="mt-4">
-                <AnswerText text={summary.answer} onCite={setOpen} />
+                <AnswerText
+                  text={summary.answer}
+                  onCite={panel.cite}
+                  active={panel.open}
+                  sourceId={(n) => `compare-src-${n}`}
+                  exists={(n) => summary.sources.some((s) => s.cited && s.number === n)}
+                />
                 {summary.warnings.length ? (
                   <p className="mt-2 rounded-lg bg-warning-soft px-3 py-2 text-sm">{summary.warnings.join(" / ")}</p>
                 ) : null}
-                <SourceList sources={summary.sources} open={open} onToggle={(n) => setOpen(open === n ? null : n)} />
+                <SourceList
+                  idPrefix="compare"
+                  sources={summary.sources}
+                  open={panel.open}
+                  request={panel.request}
+                  onToggle={panel.toggle}
+                  onClose={panel.close}
+                  onReturn={panel.onReturn}
+                  className="mt-3"
+                />
                 <p className="mt-2 text-xs text-muted">모델 {summary.model}</p>
               </div>
             ) : null}

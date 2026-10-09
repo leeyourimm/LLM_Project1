@@ -9,6 +9,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass, field
 
 from dartrag.config import Settings
+from dartrag.dashboard import DashboardCache
 from dartrag.db import Repository
 
 
@@ -42,6 +43,8 @@ class Services:
     tracer: Callable[[], object] | None = None
     # 화면을 다른 주소에서 띄울 때(예: Next 개발 서버 http://localhost:3000) 그 주소
     allowed_origins: tuple[str, ...] = ()
+    # 기업 대시보드 캐시. 기본은 이 프로세스 메모리, 배포 설정에서는 Redis (작업자가 미리 채운다)
+    dashboards: DashboardCache = field(default_factory=DashboardCache)
 
 
 def default_services(settings: Settings) -> Services:
@@ -90,6 +93,7 @@ def default_services(settings: Settings) -> Services:
         metrics_token=settings.metrics_token,
         ops_snapshot=lambda: ops_snapshot(settings, repo, backends.redis),
         tracer=lambda: get_tracer(settings),
+        dashboards=DashboardCache(backends.redis, ttl=settings.dashboard_cache_ttl),
     )
 
 

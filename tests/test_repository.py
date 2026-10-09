@@ -18,7 +18,8 @@ pytestmark = pytest.mark.skipif(not URL, reason="TEST_DATABASE_URL 없음")
 def repo():
     conn = psycopg.connect(URL)
     conn.execute(
-        "DROP TABLE IF EXISTS eval_runs, data_issues, job_runs, backfill_state, diff_summaries, "
+        "DROP TABLE IF EXISTS company_versions, eval_runs, data_issues, job_runs, backfill_state, "
+        "diff_summaries, "
         "user_notifications, user_alert_channels, auth_tokens, user_devices, "
         "feedback, messages, conversations, sessions, user_watchlist, "
         "users, notifications, watchlist, disclosures, chunks, financial_items, filings, "
@@ -739,3 +740,113 @@ def test_migration_marks_alert_verified_users(repo):
     assert repo.email_verified(uid) is False
     repo.migrate()  # 마이그레이션은 여러 번 돌려도 된다
     assert repo.email_verified(uid) is True
+
+
+def _disclosure(no: str, corp: str = "00126380") -> dict:
+    return {
+        "rcept_no": no,
+        "corp_code": corp,
+        "corp_name": "삼성전자",
+        "stock_code": "005930",
+        "corp_cls": "Y",
+        "report_nm": "주요사항보고서(유상증자결정)",
+        "flr_nm": None,
+        "rcept_dt": date(2025, 3, 11),
+        "rm": None,
+        "pblntf_ty": "B",
+        "event_type": "x",
+        "event_label": "유상증자",
+        "importance": 3,
+        "correction": False,
+    }
+
+
+def test_company_versions_follow_dashboard_data(repo):
+    from dataclasses import replace
+
+    from dartrag.finance.validate import Issue
+
+    repo.upsert_companies(
+        [
+            Corp(corp_code="00126380", corp_name="삼성전자", stock_code="005930"),
+            Corp(corp_code="00164779", corp_name="SK하이닉스", stock_code="000660"),
+        ]
+    )
+    code = "00126380"
+    seen = [repo.company_version(code)]
+
+    def changed() -> bool:
+        seen.append(repo.company_version(code))
+        return seen[-1] != seen[-2]
+
+    other = repo.company_version("00164779")
+    # 재무 수치를 바꾸면 오른다
+    repo.replace_financials(code, 2024, "11011", "CFS", [item(100)])
+    assert changed()
+    # 새 공시가 들어오면 오르고, 이미 있던 공시를 다시 받으면 그대로
+    assert repo.insert_disclosures([_disclosure("20250311000001")]) == ["20250311000001"]
+    assert changed()
+    assert repo.insert_disclosures([_disclosure("20250311000001")]) == []
+    assert not changed()
+    # 검증 결과는 화면에 보이는 내용이 달라질 때만
+    issue = Issue(code, 2024, "11011", "CFS", "balance", "error", "어긋남")
+    repo.replace_issues(code, [issue])
+    assert changed()
+    repo.replace_issues(code, [issue])
+    assert not changed()
+    repo.replace_issues(code, (i for i in [replace(issue, detail="더 어긋남")]))
+    assert changed() and repo.data_issues(code)[0]["detail"] == "더 어긋남"
+    repo.replace_issues(code, [])
+    assert changed()
+    # 다른 회사, 없는 회사는 영향 없음
+    assert repo.company_version("00164779") == other
+    assert repo.company_version("00000000") == "0"
+    # 회사 정보(이름)가 바뀌어도 달라진다
+    repo.upsert_companies([Corp(corp_code=code, corp_name="삼성전자(주)", stock_code="005930")])
+    assert changed()
+
+
+def test_filing_freshness_and_dashboard_targets(repo):
+    repo.upsert_companies(
+        [
+            Corp(corp_code="00126380", corp_name="삼성전자", stock_code="005930"),
+            Corp(corp_code="00164779", corp_name="SK하이닉스", stock_code="000660"),
+        ]
+    )
+
+    def filing(no, name, day, corp="00126380"):
+        f = Filing(corp_code=corp, corp_name="x", report_nm=name, rcept_no=no, rcept_dt=day)
+        repo.upsert_filing(f, parse_report_name(name), "11011", None)
+
+    filing("20250311000001", "사업보고서 (2024.12)", date(2025, 3, 11))
+    filing("20250814000002", "반기보고서 (2025.06)", date(2025, 8, 14))
+    filing("20250312000003", "사업보고서 (2024.12)", date(2025, 3, 12), corp="00164779")
+    repo.mark_indexed("20250311000001", 1, "m")
+    repo.mark_indexed("20250312000003", 1, "m")
+
+    got = repo.filing_freshness(["20250311000001", "20250312000003", "29991231999999"])
+    assert set(got) == {"20250311000001", "20250312000003"}
+    samsung = got["20250311000001"]
+    assert samsung["corp_code"] == "00126380" and samsung["rcept_dt"] == date(2025, 3, 11)
+    # 같은 회사의 더 최근 정기공시(아직 색인 전)
+    assert samsung["latest"] == {
+        "rcept_no": "20250814000002",
+        "report_nm": "반기보고서 (2025.06)",
+        "rcept_dt": date(2025, 8, 14),
+        "indexed": False,
+    }
+    assert got["20250312000003"]["latest"]["rcept_no"] == "20250312000003"
+    assert repo.filing_freshness([]) == {}
+
+    # 미리 만들 대시보드: 운영자나 사용자 누군가의 관심 종목
+    assert repo.watched_companies() == []
+    repo.set_watch("00164779", 2)
+    uid = repo.create_user("a@b.co", "h")
+    repo.set_watch("00126380", 2, uid)
+    repo.set_watch("00164779", 3, uid)
+    # 회사 이름 정렬은 DB 로캘마다 달라서 회사 코드 순서로 돌려준다
+    assert repo.watched_companies() == [
+        ("00126380", "삼성전자", "005930"),
+        ("00164779", "SK하이닉스", "000660"),
+    ]
+    assert repo.companies_by_code(["00126380", "99999999"]) == [("00126380", "삼성전자", "005930")]

@@ -10,7 +10,8 @@
 - default: 알림, 검증, 정리
 
 새 정기보고서가 공시되면: 피드(10분마다) → 수집(5분마다) → 처리 → 알림 순으로 이어져
-30분 안에 검색·요약·알림까지 반영된다.
+30분 안에 검색·요약·알림까지 반영된다. 처리가 끝난 회사는 기업 대시보드도 미리 만들어 두고,
+관심 종목 회사의 대시보드는 주기적으로(DASHBOARD_WARM_MINUTES) 바뀐 것만 다시 만든다.
 """
 
 import logging
@@ -97,6 +98,8 @@ def process(corp_codes: list[str]):
     key = "process:" + ",".join(sorted(corp_codes))[:200]
     result = _run("process", jobs.process, lock_key=key, corp_codes=corp_codes)
     send_alerts.delay()
+    # 새 재무 수치·검증 결과가 반영된 대시보드를 사용자가 열기 전에 만들어 둔다
+    warm_dashboards.delay(corp_codes)
     return result
 
 
@@ -104,6 +107,19 @@ def process(corp_codes: list[str]):
 def process_backlog():
     """과거 데이터 채우기로 쌓인 원문을 조금씩 파싱·색인."""
     return _run("process_backlog", jobs.process, limit=200)
+
+
+@app.task(name="dartrag.warm_dashboards")
+def warm_dashboards(corp_codes: list[str] | None = None):
+    """기업 대시보드 미리 만들기. 회사를 주지 않으면 관심 종목 회사 전부."""
+    target = ",".join(sorted(corp_codes))[:200] if corp_codes else "watchlist"
+    return _run(
+        "warm_dashboards",
+        jobs.warm_dashboards,
+        lock_key=f"warm_dashboards:{target}",
+        lock_seconds=1800,
+        corp_codes=corp_codes,
+    )
 
 
 @app.task(name="dartrag.send_alerts")
@@ -144,6 +160,10 @@ app.conf.beat_schedule = {
     "feed-poll": {"task": "dartrag.feed_poll", "schedule": _every(settings.feed_poll_minutes)},
     "ingest": {"task": "dartrag.ingest", "schedule": _every(settings.ingest_minutes)},
     "alerts": {"task": "dartrag.send_alerts", "schedule": _every(settings.alerts_minutes)},
+    "warm-dashboards": {
+        "task": "dartrag.warm_dashboards",
+        "schedule": _every(settings.dashboard_warm_minutes),
+    },
     "backfill": {"task": "dartrag.backfill", "schedule": _every(30)},
     "process-backlog": {"task": "dartrag.process_backlog", "schedule": _every(15)},
     # 새벽에: 전체 검증, 보관 기간 정리

@@ -10,7 +10,7 @@ from typing import Protocol
 from dartrag.answer.gateway import last_call
 from dartrag.answer.guard import check_question
 from dartrag.answer.llm import _THINK_RE, LLM
-from dartrag.answer.numbers import split_sentences, unverified_numbers
+from dartrag.answer.numbers import checked_count, split_sentences, unverified_numbers
 from dartrag.answer.prompt import NOT_FOUND, build_messages, source_text
 from dartrag.obs import metrics
 from dartrag.obs.tracing import NOOP, Tracer
@@ -36,6 +36,9 @@ class Answer:
     unverified: list[str] = field(default_factory=list)
     # 근거 번호가 없거나 없는 번호를 인용한 경우, 확인되지 않은 숫자가 있는 경우
     warnings: list[str] = field(default_factory=list)
+    # 신뢰도 표시용: 출처 목록에 없는 인용 번호, 원문과 대조한 숫자 개수
+    invalid_citations: list[int] = field(default_factory=list)
+    numbers_checked: int = 0
     refused: str | None = None  # advice / injection: 정책상 답하지 않은 질문
     cached: bool = False
     model: str | None = None  # 실제로 답한 모델 (대체 모델이 답했으면 그 이름)
@@ -272,6 +275,7 @@ def check_citations(answer: Answer) -> Answer:
     valid = [n for n in cited if 1 <= n <= len(answer.hits)]
     invalid = [n for n in cited if n not in valid]
     answer.citations = [Citation(n, answer.hits[n - 1]) for n in valid]
+    answer.invalid_citations = invalid
     if invalid:
         answer.warnings.append(f"존재하지 않는 출처 번호를 인용함: {invalid}")
     if not valid:
@@ -287,6 +291,7 @@ def check_numbers(answer: Answer) -> None:
         hits = [answer.hits[n - 1] for n in sorted(numbers) if 1 <= n <= len(answer.hits)]
         sources = [(source_text(h), h.chunk.get("unit")) for h in hits or answer.hits]
         answer.unverified += unverified_numbers(sentence, sources)
+        answer.numbers_checked += checked_count(sentence)
     if answer.unverified:
         answer.warnings.append(
             "인용한 원문에서 확인되지 않은 숫자(오기이거나 계산값): " + ", ".join(answer.unverified)

@@ -106,6 +106,8 @@ class FinanceTool:
             {
                 "chunk_id": "finance",
                 "rcept_no": first.rcept_no if first else None,
+                # 표에 쓴 값이 나온 보고서 전부 (답변 신뢰도의 최신 공시 판단에 쓴다)
+                "rcept_nos": used_rcept_nos(query, values),
                 "corp_name": ", ".join(names.get(c, c) for c in query.corp_codes),
                 "report_nm": f"OpenDART 재무제표 ({query.period_label})",
                 "kind": "finance",
@@ -126,6 +128,18 @@ def _years(query: FinanceQuery, values: dict[str, dict[tuple[str, int], Value]],
         return query.years
     available = sorted({y for vs in values.values() for (c, y) in vs if c == corp})
     return available[-2:] if query.growth else available[-1:]
+
+
+def used_rcept_nos(query: FinanceQuery, values: dict[str, dict[tuple[str, int], Value]]):
+    """render 가 표에 넣는 값들의 접수번호 (오래된 것부터)."""
+    used = {
+        v.rcept_no
+        for corp in query.corp_codes
+        for key in query.needed_metrics
+        for y in _years(query, values, corp)
+        if (v := values[key].get((corp, y)))
+    }
+    return sorted(used)
 
 
 def render(

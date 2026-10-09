@@ -44,6 +44,8 @@ def answer_to_dict(a: Answer) -> dict:
         "refused": a.refused,
         "hits": [asdict(h) for h in a.hits],
         "citations": [c.number for c in a.citations],
+        "invalid_citations": a.invalid_citations,
+        "numbers_checked": a.numbers_checked,
     }
 
 
@@ -58,6 +60,9 @@ def answer_from_dict(d: dict) -> Answer:
         unverified=d["unverified"],
         warnings=d["warnings"],
         refused=d.get("refused"),
+        # 이 항목이 생기기 전에 저장한 답에는 없다
+        invalid_citations=d.get("invalid_citations", []),
+        numbers_checked=d.get("numbers_checked", 0),
         cached=True,
     )
 
