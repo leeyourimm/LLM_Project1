@@ -1,0 +1,35 @@
+# 의존성 업데이트 PR 을 매주 만든다. 마이너·패치는 생태계별로 한 PR 로 묶고, 메이저는 따로 연다.
+# pip 은 pyproject.toml 과 requirements/*.txt(잠금 파일)를 본다. 잠금 파일을 크게 바꿀 때는 `make lock` 으로 다시 만든다
+version: 2
+updates:
+  - package-ecosystem: pip
+    directory: "/"
+    schedule:
+      interval: weekly
+    groups:
+      python-minor-patch:
+        update-types: [minor, patch]
+
+  - package-ecosystem: npm
+    directory: "/frontend"
+    schedule:
+      interval: weekly
+    groups:
+      npm-minor-patch:
+        update-types: [minor, patch]
+
+  - package-ecosystem: docker
+    directories: ["/", "/frontend"]
+    schedule:
+      interval: weekly
+    groups:
+      docker-minor-patch:
+        update-types: [minor, patch]
+
+  - package-ecosystem: github-actions
+    directory: "/"
+    schedule:
+      interval: weekly
+    groups:
+      actions-minor-patch:
+        update-types: [minor, patch]
