@@ -53,3 +53,26 @@ def index_filings(
         summary.chunks += len(chunks)
     keyword.refresh()
     return summary
+
+
+def rebuild_keyword_index(repo: Repository, keyword: KeywordIndex) -> IndexSummary:
+    """이미 색인한 공시를 DB 의 청크로 키워드 색인(OpenSearch)에만 다시 넣는다.
+
+    벡터(Qdrant)는 스냅샷으로 옮기고 키워드 색인은 백업하지 않으므로, 다른 서버로 데이터를
+    옮긴 뒤에 쓴다. 임베딩을 다시 계산하지 않아 CPU 만 있는 작은 서버에서도 금방 끝난다.
+    """
+    summary = IndexSummary()
+    keyword.ensure()
+    for rcept_no in repo.indexed_filing_numbers():
+        chunks = repo.indexed_chunks(rcept_no)
+        try:
+            keyword.delete_filing(rcept_no)
+            keyword.upsert(chunks)
+        except Exception as e:
+            log.exception("키워드 색인 실패 %s", rcept_no)
+            summary.errors.append(f"{rcept_no}: {e}")
+            continue
+        summary.filings += 1
+        summary.chunks += len(chunks)
+    keyword.refresh()
+    return summary

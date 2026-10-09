@@ -15,8 +15,9 @@ if [ $# -ne 1 ] || [ ! -f "$1/postgres.dump" ]; then
 fi
 src="$(cd "$1" && pwd)"
 
+# .env 의 COMPOSE_FILE·COMPOSE_PROFILES(작은 서버용 덮어쓰기 등)도 따르도록 이 폴더에서 실행한다
 compose() {
-  docker compose -f "$HERE/docker-compose.yml" "$@"
+  (cd "$HERE" && docker compose "$@")
 }
 
 echo "이 백업으로 되돌립니다: $src"

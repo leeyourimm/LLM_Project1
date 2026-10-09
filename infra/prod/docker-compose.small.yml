@@ -1,0 +1,58 @@
+# 메모리 12GB 서버용 덮어쓰기 (Oracle Cloud 무료 Ampere A1: 2코어·12GB). 안내는 docs/deploy-oracle.md
+#
+# .env 에 아래 두 줄을 넣으면 docker compose 명령에 -f 나 --profile 을 붙이지 않아도 함께 적용된다.
+#   COMPOSE_FILE=docker-compose.yml:docker-compose.small.yml
+#   COMPOSE_PROFILES=ollama
+#
+# 메모리 예산 (대략, 실제 값은 docker stats 로 확인)
+#   api       약 5GB  임베딩 모델(bge-m3)과 리랭커를 함께 올림
+#   ollama    약 3GB  qwen3:4b. 5분 동안 질문이 없으면 내려놓아 색인 작업에 메모리를 돌려준다
+#   worker    평소 0.5GB, 새 공시를 색인할 때만 약 3GB (작업 하나마다 프로세스를 새로 띄워 끝나면 돌려줌)
+#   나머지    약 3GB  Postgres, Redis, Qdrant, OpenSearch, 웹 화면, Caddy
+# 합이 12GB 를 넘을 수 있는 순간(질문과 색인이 겹칠 때)은 스왑이 받는다. 스왑 설정도 안내서에 있다.
+# 한 컨테이너가 한도를 넘으면 그 컨테이너만 다시 시작되고 나머지는 계속 돈다.
+
+services:
+  postgres:
+    command: ["postgres", "-c", "shared_buffers=256MB", "-c", "max_connections=50"]
+    mem_limit: 768m
+
+  redis:
+    # TTL 이 있는 캐시 키만 밀어낸다. TTL 이 없는 작업 대기열은 지우지 않는다
+    command: ["redis-server", "--appendonly", "yes",
+              "--maxmemory", "200mb", "--maxmemory-policy", "volatile-lru"]
+    mem_limit: 256m
+
+  qdrant:
+    mem_limit: 1g
+
+  opensearch:
+    environment:
+      OPENSEARCH_JAVA_OPTS: -Xms512m -Xmx512m
+    mem_limit: 1280m
+
+  api:
+    mem_limit: 6g
+
+  worker:
+    # 동시에 작업 하나, 작업이 끝날 때마다 프로세스를 새로 띄워 모델 메모리를 돌려준다
+    command: ["celery", "-A", "dartrag.worker.celery_app", "worker",
+              "-Q", "dart,process,default", "-c", "1", "--max-tasks-per-child", "1",
+              "--loglevel", "INFO"]
+    mem_limit: 3500m
+
+  beat:
+    mem_limit: 256m
+
+  frontend:
+    mem_limit: 384m
+
+  caddy:
+    mem_limit: 128m
+
+  ollama:
+    environment:
+      OLLAMA_KEEP_ALIVE: 5m
+      OLLAMA_NUM_PARALLEL: "1"
+      OLLAMA_MAX_LOADED_MODELS: "1"
+    mem_limit: 4g

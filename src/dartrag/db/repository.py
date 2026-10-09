@@ -215,6 +215,13 @@ class Repository:
         rows = self.conn.execute(query + " ORDER BY rcept_dt, rcept_no", params).fetchall()
         return [r[0] for r in rows]
 
+    def indexed_filing_numbers(self) -> list[str]:
+        """검색 색인에 들어간 공시의 접수번호."""
+        rows = self.conn.execute(
+            "SELECT rcept_no FROM filings WHERE indexed_at IS NOT NULL ORDER BY rcept_no"
+        ).fetchall()
+        return [r[0] for r in rows]
+
     def indexed_chunks(self, rcept_no: str) -> list[IndexedChunk]:
         rows = self.conn.execute(
             """

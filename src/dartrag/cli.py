@@ -147,17 +147,30 @@ def _retriever(stocks, year_from, year_to):
 
 
 @app.command()
-def index():
+def index(
+    keyword_only: Annotated[
+        bool,
+        typer.Option(
+            "--keyword-only",
+            help="이미 색인한 공시를 키워드 색인에만 다시 넣기 (데이터를 다른 서버로 옮긴 뒤)",
+        ),
+    ] = False,
+):
     """파싱한 청크를 임베딩해 벡터·키워드 검색 인덱스에 넣기."""
-    from dartrag.pipeline.index import index_filings
+    from dartrag.pipeline.index import index_filings, rebuild_keyword_index
 
     logging.basicConfig(level=logging.INFO)
     logging.getLogger("httpx").setLevel(logging.WARNING)
     settings = get_settings()
     repo = Repository.connect(settings.database_url)
     repo.migrate()
-    embedder, vector, keyword = _search_backends(settings)
-    summary = index_filings(repo, embedder, vector, keyword)
+    if keyword_only:
+        from dartrag.search import KeywordIndex
+
+        summary = rebuild_keyword_index(repo, KeywordIndex.connect(settings.opensearch_url))
+    else:
+        embedder, vector, keyword = _search_backends(settings)
+        summary = index_filings(repo, embedder, vector, keyword)
     typer.echo(f"공시 {summary.filings}건, 청크 {summary.chunks}개 색인")
     for line in summary.errors:
         typer.echo(f"오류: {line}", err=True)

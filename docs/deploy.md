@@ -1,6 +1,6 @@
 # 서버에 배포하기
 
-리눅스 서버 한 대에 Docker로 서비스를 띄우고 https로 공개하는 방법입니다. 처음 해 보는 분도 위에서부터 한 줄씩 따라 하면 되도록 썼습니다. 명령은 한 줄에 하나씩, 서버 터미널에 그대로 붙여 넣으세요.
+리눅스 서버 한 대에 Docker로 서비스를 띄우고 https로 공개하는 방법입니다. Oracle Cloud 무료 서버(2코어·12GB)에 올린다면 [deploy-oracle.md](deploy-oracle.md)를 먼저 보세요. 처음 해 보는 분도 위에서부터 한 줄씩 따라 하면 되도록 썼습니다. 명령은 한 줄에 하나씩, 서버 터미널에 그대로 붙여 넣으세요.
 
 ## 구성
 
@@ -239,7 +239,7 @@ docker image prune -f
 
 ### 의존성 버전 (잠금 파일)
 
-백엔드 이미지와 CI는 `pyproject.toml` 이 아니라 `requirements/` 의 잠금 파일로 설치합니다 (버전과 해시 고정, Linux x86_64·Python 3.12 기준).
+백엔드 이미지와 CI는 `pyproject.toml` 이 아니라 `requirements/` 의 잠금 파일로 설치합니다 (버전과 해시 고정, Linux x86_64·Python 3.12 기준). 같은 잠금 파일에 arm64 휠 해시도 들어 있어 arm64 서버(Oracle Ampere 등)에서도 그대로 설치되며, CI 의 `docker-arm64` 작업이 이를 확인합니다.
 
 - `requirements/runtime.txt`: 배포 이미지용 (`ops`, `embed`). PyTorch·CUDA 패키지는 뺍니다.
 - `requirements/torch.txt`: PyTorch 버전. 이미지는 CPU 전용 색인에서 이 버전을 받습니다 (해시는 고정하지 않음).
