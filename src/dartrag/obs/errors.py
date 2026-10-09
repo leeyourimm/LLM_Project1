@@ -13,9 +13,12 @@ _DROP_REQUEST_KEYS = ("data", "cookies", "query_string", "env")
 _SECRET_HEADER = re.compile(r"cookie|authorization|token|secret|api-key", re.I)
 _EMAIL = re.compile(r"[\w.+-]+@[\w-]+\.[\w.-]+")
 _BOT_TOKEN = re.compile(r"bot\d+:[\w-]{20,}")
+# 주소의 쿼리 문자열에 든 비밀값 (OpenDART crtfc_key, 인증 링크 token, 구독 취소 t 등)
+_QUERY_SECRET = re.compile(r"([?&](?:crtfc_key|token|t|key|secret|api_key)=)[^&\s'\"]+", re.I)
 
 
 def _scrub_text(text: str) -> str:
+    text = _QUERY_SECRET.sub(r"\1[삭제]", text)
     return _BOT_TOKEN.sub("bot[삭제]", _EMAIL.sub("[이메일]", text))
 
 

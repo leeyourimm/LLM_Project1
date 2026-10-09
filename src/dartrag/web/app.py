@@ -12,6 +12,7 @@ from typing import Annotated
 from urllib.parse import urlsplit
 
 from fastapi import APIRouter, Depends, FastAPI, HTTPException, Path, Query, Request, Response
+from fastapi.encoders import jsonable_encoder
 from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse
 from fastapi.staticfiles import StaticFiles
 from prometheus_client import CONTENT_TYPE_LATEST, CollectorRegistry, generate_latest
@@ -41,6 +42,10 @@ class PasswordChange(BaseModel):
     new: str = Field(max_length=auth.PASSWORD_MAX)
 
 
+class AccountDelete(BaseModel):
+    password: str = Field(max_length=auth.PASSWORD_MAX)
+
+
 @dataclass(frozen=True)
 class User:
     id: int
@@ -51,7 +56,11 @@ SECURITY_HEADERS = {
     "X-Content-Type-Options": "nosniff",
     "X-Frame-Options": "DENY",
     "Referrer-Policy": "same-origin",
+    "Cross-Origin-Opener-Policy": "same-origin",
+    "Permissions-Policy": "camera=(), microphone=(), geolocation=(), payment=()",
 }
+# https 로 서비스할 때(COOKIE_SECURE=true)만. http 로 여는 내 컴퓨터에서는 붙이지 않는다
+HSTS = "max-age=31536000"
 # /api/docs 는 CDN 스크립트를 쓰므로 화면에만 적용
 CSP = (
     "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; "
@@ -74,11 +83,16 @@ def create_app(services: Services, limiter: auth.LoginLimiter | None = None) -> 
         # 다른 사이트가 사용자 브라우저를 통해 몰래 보내는 요청(CSRF)을 막는다
         if request.method in UNSAFE_METHODS:
             origin = request.headers.get("origin")
-            if (
-                origin
-                and urlsplit(origin).netloc != request.headers.get("host")
-                and origin.rstrip("/") not in services.allowed_origins
-            ):
+            if origin:
+                cross = (
+                    urlsplit(origin).netloc != request.headers.get("host")
+                    and origin.rstrip("/") not in services.allowed_origins
+                )
+            else:
+                # Origin 을 빼고 보내는 브라우저도 Sec-Fetch-Site 는 붙인다. 메일 앱의 구독 취소,
+                # 텔레그램 웹훅처럼 브라우저가 아닌 곳에서 오는 요청에는 둘 다 없다
+                cross = request.headers.get("sec-fetch-site") == "cross-site"
+            if cross:
                 return JSONResponse({"detail": "다른 사이트에서 온 요청은 받지 않습니다"}, 403)
         started = time.perf_counter()
         response = await call_next(request)
@@ -89,8 +103,13 @@ def create_app(services: Services, limiter: auth.LoginLimiter | None = None) -> 
             metrics.HTTP_REQUESTS.labels(request.method, path, str(response.status_code)).inc()
             metrics.HTTP_SECONDS.labels(request.method, path).observe(time.perf_counter() - started)
         response.headers.update(SECURITY_HEADERS)
+        if services.cookie_secure:
+            response.headers["Strict-Transport-Security"] = HSTS
         if not request.url.path.startswith("/api/docs"):
             response.headers["Content-Security-Policy"] = CSP
+        # API 응답(대화, 관심 종목, 내 데이터)은 사용자별이라 브라우저·프록시에 남기지 않는다
+        if request.url.path.startswith("/api/") and "cache-control" not in response.headers:
+            response.headers["Cache-Control"] = "no-store"
         return response
 
     def session_user(request: Request) -> User | None:
@@ -139,6 +158,15 @@ def create_app(services: Services, limiter: auth.LoginLimiter | None = None) -> 
             samesite="lax",
             secure=services.cookie_secure,
             path="/",
+        )
+
+    def clear_session_cookie(response: Response) -> None:
+        response.delete_cookie(
+            auth.SESSION_COOKIE,
+            path="/",
+            httponly=True,
+            samesite="lax",
+            secure=services.cookie_secure,
         )
 
     def need_auth_mode():
@@ -195,7 +223,7 @@ def create_app(services: Services, limiter: auth.LoginLimiter | None = None) -> 
         if token:
             with services.repo() as repo:
                 repo.delete_session(auth.token_hash(token))
-        response.delete_cookie(auth.SESSION_COOKIE, path="/")
+        clear_session_cookie(response)
         return {"ok": True}
 
     @api.post("/api/auth/password", dependencies=[rate("auth")])
@@ -212,6 +240,36 @@ def create_app(services: Services, limiter: auth.LoginLimiter | None = None) -> 
             repo.set_password(user.id, auth.hash_password(req.new))
         start_session(response, user.id)
         return {"ok": True}
+
+    @api.delete("/api/account", dependencies=[rate("auth")])
+    def delete_account(req: AccountDelete, user: CurrentUser, response: Response):
+        """탈퇴: 지금 비밀번호를 확인하고 계정과 관심 종목, 알림 설정, 대화 기록을 모두 지운다."""
+        need_auth_mode()
+        with services.repo() as repo:
+            row = repo.user_by_email(user.email)
+            if row is None or not auth.verify_password(req.password, row[2]):
+                raise HTTPException(401, "비밀번호가 맞지 않습니다")
+            repo.delete_user(user.id)
+        clear_session_cookie(response)
+        return {"ok": True}
+
+    @api.get("/api/account/export", dependencies=[rate("heavy")])
+    def export_account(user: CurrentUser):
+        """내 데이터 내려받기 (JSON). 비밀번호 해시와 인증 코드는 넣지 않는다."""
+        need_auth_mode()
+        with services.repo() as repo:
+            data = repo.export_user(user.id)
+        if data is None:
+            raise HTTPException(404, "계정을 찾을 수 없습니다")
+        body = {"exported_at": datetime.now(UTC), "service": "DART 공시 분석"} | data
+        filename = f"dartrag-export-{datetime.now(UTC):%Y%m%d}.json"
+        return JSONResponse(
+            jsonable_encoder(body),
+            headers={
+                "Content-Disposition": f'attachment; filename="{filename}"',
+                "Cache-Control": "no-store",
+            },
+        )
 
     def corp_codes(repo, stocks: list[str]) -> list[str]:
         if not stocks:

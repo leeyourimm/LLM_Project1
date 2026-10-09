@@ -3,6 +3,8 @@
 # --profile search: Qdrant, OpenSearch(nori) (1단계 검색부터 사용)
 # --profile monitoring: Prometheus(9090), Grafana(3002). dartrag serve 의 /metrics 를 읽는다
 # --profile langfuse: Langfuse(3001). 질문별 검색·답변 과정을 본다. 메모리를 2~3GB 더 쓴다
+# 모든 포트는 127.0.0.1 에만 연다. Docker 가 연 포트는 방화벽(ufw)을 거치지 않아서, 0.0.0.0 으로
+# 열면 기본 비밀번호의 Postgres, 비밀번호 없는 Redis·OpenSearch·Qdrant 가 인터넷에 그대로 열린다
 name: dartrag
 
 services:
@@ -12,7 +14,7 @@ services:
       POSTGRES_USER: dartrag
       POSTGRES_PASSWORD: dartrag
       POSTGRES_DB: dartrag
-    ports: ["5432:5432"]
+    ports: ["127.0.0.1:5432:5432"]
     volumes:
       - pgdata:/var/lib/postgresql/data
       - ./db:/docker-entrypoint-initdb.d:ro
@@ -24,7 +26,7 @@ services:
   qdrant:
     image: qdrant/qdrant:v1.19.2
     profiles: [search]
-    ports: ["6333:6333"]
+    ports: ["127.0.0.1:6333:6333"]
     volumes: [qdrantdata:/qdrant/storage]
 
   opensearch:
@@ -34,12 +36,12 @@ services:
       discovery.type: single-node
       DISABLE_SECURITY_PLUGIN: "true"
       OPENSEARCH_JAVA_OPTS: -Xms1g -Xmx1g
-    ports: ["9200:9200"]
+    ports: ["127.0.0.1:9200:9200"]
     volumes: [osdata:/usr/share/opensearch/data]
 
   redis:
     image: redis:7
-    ports: ["6379:6379"]
+    ports: ["127.0.0.1:6379:6379"]
 
   prometheus:
     image: prom/prometheus:v3.13.4

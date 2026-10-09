@@ -198,6 +198,39 @@ def check_alerts(settings: Settings) -> Check:
     )
 
 
+def security_problems(settings: Settings) -> list[str]:
+    """인터넷에 공개할 때 위험한 설정. 내 컴퓨터에서만 쓸 때(로그인 끔)는 보지 않는다."""
+    s = settings
+    public = s.auth_required or s.environment == "production" or s.public_url.startswith("https")
+    if not public:
+        return []
+    problems = []
+    if not s.auth_required:
+        problems.append("AUTH_REQUIRED=false 로 공개하면 누구나 질문·관심 종목을 쓸 수 있습니다")
+    if s.public_url.startswith("https") and not s.cookie_secure:
+        problems.append(
+            "https 로 서비스하면 COOKIE_SECURE=true 로 로그인 쿠키를 https 에만 보내세요"
+        )
+    if len(s.secret_key) < 32:
+        problems.append("SECRET_KEY 가 32자보다 짧습니다 (구독 취소 링크 서명)")
+    if not s.metrics_token:
+        problems.append("METRICS_TOKEN 이 없어 /metrics 를 프록시에서 꼭 막아야 합니다")
+    if s.telegram_webhook_secret and len(s.telegram_webhook_secret) < 16:
+        problems.append("TELEGRAM_WEBHOOK_SECRET 이 16자보다 짧습니다")
+    return problems
+
+
+def check_security(settings: Settings) -> Check:
+    problems = security_problems(settings)
+    return Check(
+        "공개 서버 보안 설정",
+        not problems,
+        "; ".join(problems) if problems else "문제 없음 (내 컴퓨터에서만 쓰면 확인하지 않음)",
+        "" if not problems else "docs/security-review.md 의 배포 설정을 확인하세요",
+        required=False,
+    )
+
+
 def run_checks(settings: Settings, http: httpx.Client | None = None, *, online: bool = True):
     own = http is None
     http = http or httpx.Client()
@@ -213,6 +246,7 @@ def run_checks(settings: Settings, http: httpx.Client | None = None, *, online: 
             check_embedding_package(),
             check_ollama(settings, http),
             check_alerts(settings),
+            check_security(settings),
             check_disk(),
         ]
     finally:

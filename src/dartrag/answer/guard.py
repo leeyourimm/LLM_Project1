@@ -5,6 +5,7 @@
 """
 
 import re
+import unicodedata
 from dataclasses import dataclass
 
 ADVICE_PATTERNS = [
@@ -43,7 +44,15 @@ class Verdict:
     reply: str
 
 
+def normalize(question: str) -> str:
+    """전각 문자(ｉｇｎｏｒｅ)나 보이지 않는 문자(zero-width space 등)로 규칙을 피하지 못하게."""
+    text = unicodedata.normalize("NFKC", question)
+    text = "".join(ch for ch in text if unicodedata.category(ch) != "Cf")
+    return re.sub(r"\s+", " ", text)
+
+
 def check_question(question: str) -> Verdict | None:
+    question = normalize(question)
     if any(p.search(question) for p in _INJECTION):
         return Verdict("injection", INJECTION_REPLY)
     if any(p.search(question) for p in _ADVICE):
