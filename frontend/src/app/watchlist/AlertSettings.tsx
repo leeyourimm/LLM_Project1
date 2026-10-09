@@ -2,6 +2,7 @@
 
 import Link from "next/link";
 import { useCallback, useEffect, useState } from "react";
+import { useApp } from "@/components/providers";
 import { ErrorBox } from "@/components/ui";
 import { api, del, patch, post } from "@/lib/api";
 import type { AlertChannel, AlertSettings as Settings } from "@/lib/types";
@@ -17,6 +18,32 @@ function stateOf(kind: "email" | "telegram", s: Settings, ch?: AlertChannel) {
 }
 
 export function AlertSettings() {
+  const { auth } = useApp();
+  if (auth?.user?.guest) return <GuestAlerts canSignup={auth.allow_signup} />;
+  return <ChannelSettings />;
+}
+
+// 체험 계정은 알림을 받을 수 없다 (받을 곳을 계정에 묶어 두고 계속 보내는 기능이라)
+function GuestAlerts({ canSignup }: { canSignup: boolean }) {
+  return (
+    <section className="card text-sm" aria-labelledby="alerts-title">
+      <h2 id="alerts-title" className="mb-2 font-semibold">
+        알림 받을 곳
+      </h2>
+      <p className="text-muted">
+        체험 계정에서는 공시 알림(이메일·텔레그램·웹 푸시)을 받을 수 없습니다. 관심 종목은 체험하는 동안 공시 피드의 &ldquo;관심 종목만&rdquo;
+        보기에 쓰입니다.{" "}
+        {canSignup ? (
+          <Link className="link" href="/signup?next=%2Fwatchlist">
+            가입하면 알림을 켤 수 있습니다
+          </Link>
+        ) : null}
+      </p>
+    </section>
+  );
+}
+
+function ChannelSettings() {
   const [s, setS] = useState<Settings | null>(null);
   const [note, setNote] = useState<React.ReactNode>(null);
   const [error, setError] = useState<unknown>(null);

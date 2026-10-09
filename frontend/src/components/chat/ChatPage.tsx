@@ -10,12 +10,6 @@ import { toStock, useApp } from "../providers";
 import { ErrorBox } from "../ui";
 import { type Turn, TurnView } from "./Message";
 
-const EXAMPLES = [
-  "삼성전자 2024년 매출액과 영업이익률은?",
-  "SK하이닉스 주요 사업 부문은?",
-  "현대차 사업보고서에 나온 주요 위험 요인은?",
-];
-
 function turnsFrom(messages: StoredMessage[]): Turn[] {
   const turns: Turn[] = [];
   for (const m of messages) {
@@ -75,11 +69,20 @@ export function ChatPage() {
   // 방금 스트리밍으로 만든 대화는 다시 불러오지 않는다
   const skipLoad = useRef<number | null>(null);
 
+  // 예시 질문은 서버 설정(EXAMPLE_QUESTIONS) 한 곳에서 온다. 서버가 답을 미리 캐시해 두어 바로 답한다
+  const [examples, setExamples] = useState<string[]>([]);
+
   const loadConversations = useCallback(() => {
     api<ConversationSummary[]>("/api/conversations").then(setConversations).catch(() => setConversations([]));
   }, []);
 
   useEffect(loadConversations, [loadConversations]);
+
+  useEffect(() => {
+    api<{ questions: string[] }>("/api/examples")
+      .then((r) => setExamples(r.questions))
+      .catch(() => setExamples([]));
+  }, []);
 
   useEffect(() => {
     if (conversationId === null) {
@@ -248,13 +251,15 @@ export function ChatPage() {
             <p className="mt-1 text-sm text-muted">
               사업보고서와 재무제표를 찾아 근거 번호와 함께 답합니다. 이어서 “그럼 전년은?”처럼 물어도 됩니다.
             </p>
-            <div className="mt-4 flex flex-wrap gap-2">
-              {EXAMPLES.map((q) => (
-                <button key={q} type="button" className="btn text-left" onClick={() => ask(q)}>
-                  {q}
-                </button>
-              ))}
-            </div>
+            {examples.length ? (
+              <div className="mt-4 flex flex-wrap gap-2" role="group" aria-label="예시로 물어보기">
+                {examples.map((q) => (
+                  <button key={q} type="button" className="btn text-left" onClick={() => ask(q)}>
+                    {q}
+                  </button>
+                ))}
+              </div>
+            ) : null}
           </div>
         ) : (
           <div className="mb-6 space-y-6">

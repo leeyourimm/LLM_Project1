@@ -115,6 +115,16 @@ class AnswerCache:
             log.warning("답변 캐시 조회 실패: %s", type(e).__name__)
             return None
 
+    def has(self, question: str, flt: SearchFilter) -> bool:
+        """지금 데이터 버전으로 이 질문(공백·대소문자만 다른 것 포함)의 답이 저장돼 있는지.
+
+        뜻이 비슷한 질문은 찾지 않는다 (예시 질문 미리 채우기용, 임베딩 모델을 부르지 않음)."""
+        try:
+            return bool(self.redis.exists(self._key(self._scope(flt), question)))
+        except Exception as e:  # noqa: BLE001
+            log.warning("답변 캐시 조회 실패: %s", type(e).__name__)
+            return False
+
     def put(self, question: str, flt: SearchFilter, answer: Answer) -> None:
         if answer.refused:
             return

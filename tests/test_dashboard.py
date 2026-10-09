@@ -202,8 +202,10 @@ def test_celery_runs_warm_after_processing_and_on_schedule(monkeypatch):
     monkeypatch.setattr(celery_app, "_run", lambda *a, **k: {"parsed": 1})
     monkeypatch.setattr(celery_app.send_alerts, "delay", lambda *a: queued.append("alerts"))
     monkeypatch.setattr(celery_app.warm_dashboards, "delay", lambda *a: queued.append(("warm", *a)))
+    monkeypatch.setattr(celery_app.warm_examples, "delay", lambda *a: queued.append("examples"))
     celery_app.process(["00126380"])
-    assert queued == ["alerts", ("warm", ["00126380"])]
+    # 색인으로 데이터 버전이 바뀌므로 예시 질문의 답도 다시 넣는다
+    assert queued == ["alerts", ("warm", ["00126380"]), "examples"]
 
     schedule = celery_app.app.conf.beat_schedule["warm-dashboards"]
     assert schedule["task"] == "dartrag.warm_dashboards" and schedule["schedule"] == 900

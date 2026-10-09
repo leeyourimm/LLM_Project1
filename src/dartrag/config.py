@@ -1,8 +1,31 @@
+import json
 from functools import lru_cache
 from pathlib import Path
 from typing import Literal
 
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+# 채팅 첫 화면의 예시 질문 (기본 수집 대상 15개사 안의 회사). 작업자가 답을 답변 캐시에 미리
+# 넣어 두어 CPU 서버에서도 누르면 바로 답한다 (dartrag cache warm).
+# .env 의 EXAMPLE_QUESTIONS 로 바꾼다
+DEFAULT_EXAMPLES = (
+    "삼성전자 2024년 매출액과 영업이익률은?",
+    "SK하이닉스 주요 사업 부문은?",
+    "현대차 사업보고서에 나온 주요 위험 요인은?",
+)
+
+
+def parse_examples(raw: str) -> tuple[str, ...]:
+    """EXAMPLE_QUESTIONS 값 → 예시 질문들. | 로 나누거나 JSON 목록. 비어 있으면 기본 예시."""
+    raw = (raw or "").strip()
+    if raw.startswith("["):
+        items = json.loads(raw)
+        if not isinstance(items, list):
+            raise ValueError("EXAMPLE_QUESTIONS 는 문자열 목록이어야 합니다")
+    else:
+        items = raw.split("|")
+    questions = tuple(q for q in (str(i).strip() for i in items) if q)
+    return questions or DEFAULT_EXAMPLES
 
 
 class Settings(BaseSettings):
@@ -43,6 +66,12 @@ class Settings(BaseSettings):
     answer_cache_ttl: int = 7 * 86400
     # 기업 대시보드 캐시 보관 시간(초). 회사 데이터가 바뀌면 이보다 먼저 새로 만든다
     dashboard_cache_ttl: int = 6 * 3600
+    # 채팅 첫 화면의 예시 질문. | 로 나누거나 JSON 목록으로 넣는다. 비우면 기본 예시
+    # 예: EXAMPLE_QUESTIONS=삼성전자 2024년 매출액은?|SK하이닉스 주요 사업 부문은?
+    example_questions: str = ""
+    # 예시 질문의 답을 답변 캐시에 미리 넣어 두는 주기(분). 데이터가 바뀐 질문만 다시 만든다.
+    # 0 이면 끔
+    example_warm_minutes: int = 30
 
     # 공시 알림 웹훅 (Slack·Discord). 비워 두면 터미널에만 출력
     alert_webhook_url: str = ""
@@ -81,6 +110,10 @@ class Settings(BaseSettings):
     session_days: int = 30
     # 가입한 이메일을 인증해야 이메일 알림을 켤 수 있게 할지. 메일 발송(SMTP)이 있어야 적용된다
     email_verification_required: bool = False
+    # 가입 없이 체험하기 (로그인을 켰을 때만). 이메일·비밀번호 없는 체험 계정을 만들고,
+    # GUEST_HOURS 가 지나면 작업자가 기록과 함께 지운다
+    allow_guest: bool = False
+    guest_hours: int = 24
 
     # 작업자(Celery). 주기는 분 단위
     feed_poll_minutes: int = 10
@@ -108,6 +141,12 @@ class Settings(BaseSettings):
     rate_heavy_per_hour: int = 10  # 비교 설명, 변경점 요약 새로 만들기, 요약이 든 PDF
     # 가입·비밀번호 변경·재설정 메일·인증 메일 다시 받기 (로그인 시도는 따로 제한)
     rate_auth_per_hour: int = 20
+    # 체험 계정: 만들기는 접속 주소별로 센다. 질문·무거운 요청은 위 한도에 더해 체험 계정이 쓰는
+    # 접속 주소별로도 세서, 체험 계정을 새로 만들어도 한도가 다시 차지 않는다
+    rate_guest_per_hour: int = 5
+    rate_guest_ask_per_minute: int = 2
+    rate_guest_ask_per_day: int = 20
+    rate_guest_heavy_per_hour: int = 3
 
     # 운영 관측. 모두 비우면 꺼진다
     environment: str = "development"  # development / production
@@ -120,6 +159,11 @@ class Settings(BaseSettings):
     langfuse_sample_rate: float = 1.0
     # 탈퇴할 때 그 사용자의 Langfuse 추적 삭제를 요청 (실패해도 탈퇴는 그대로 끝남)
     langfuse_delete_on_account_delete: bool = True
+
+    @property
+    def examples(self) -> tuple[str, ...]:
+        """채팅 첫 화면과 답변 캐시 미리 넣기가 함께 쓰는 예시 질문."""
+        return parse_examples(self.example_questions)
 
 
 @lru_cache

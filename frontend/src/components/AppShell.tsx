@@ -3,6 +3,7 @@
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
 import { useEffect, useState } from "react";
+import { signupHref, timeLeft } from "@/lib/guest";
 import { useApp } from "./providers";
 import { Loading } from "./ui";
 
@@ -65,6 +66,22 @@ function VerifyBanner() {
   );
 }
 
+// 체험 계정으로 둘러보는 동안 모든 화면 위에 보이는 안내
+function GuestBanner({ expiresAt, canSignup, pathname }: { expiresAt?: string; canSignup: boolean; pathname: string }) {
+  return (
+    <div role="status" aria-label="체험 계정 안내" className="border-b border-accent/30 bg-accent-soft">
+      <p className="mx-auto max-w-6xl px-4 py-2 text-sm">
+        가입 없이 체험하는 중입니다. 기록은 {timeLeft(expiresAt)} 뒤 지워집니다.{" "}
+        {canSignup ? (
+          <Link href={signupHref(pathname)} className="link font-semibold">
+            가입하고 이어서 쓰기
+          </Link>
+        ) : null}
+      </p>
+    </div>
+  );
+}
+
 export function AppShell({ children }: { children: React.ReactNode }) {
   const { auth, logout } = useApp();
   const pathname = usePathname();
@@ -105,7 +122,21 @@ export function AppShell({ children }: { children: React.ReactNode }) {
           )}
           <div className="flex items-center gap-2 text-sm">
             <ThemeToggle />
-            {auth?.user ? (
+            {auth?.user?.guest ? (
+              <>
+                <Link href="/account" className="text-muted hover:text-ink">
+                  체험 계정
+                </Link>
+                <button
+                  type="button"
+                  className="btn px-2 py-1 text-xs"
+                  title="체험 기록을 지우고 나갑니다"
+                  onClick={() => logout()}
+                >
+                  체험 끝내기
+                </button>
+              </>
+            ) : auth?.user ? (
               <>
                 <Link href="/account" className="text-muted hover:text-ink">
                   {auth.user.email}
@@ -118,7 +149,10 @@ export function AppShell({ children }: { children: React.ReactNode }) {
           </div>
         </div>
       </header>
-      {auth?.user && auth.email_verification_required && !auth.user.email_verified && !isPublic ? <VerifyBanner /> : null}
+      {auth?.user?.guest && !pathname.startsWith("/signup") ? (
+        <GuestBanner expiresAt={auth.user.guest_expires_at} canSignup={auth.allow_signup} pathname={pathname} />
+      ) : null}
+      {auth?.user && !auth.user.guest && auth.email_verification_required && !auth.user.email_verified && !isPublic ? <VerifyBanner /> : null}
       <main className="mx-auto w-full max-w-6xl flex-1 px-4 py-6">
         {auth === null || needLogin ? <Loading /> : children}
       </main>

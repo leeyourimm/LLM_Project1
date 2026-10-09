@@ -1,16 +1,19 @@
 "use client";
 
+import Link from "next/link";
 import { useCallback, useEffect, useState } from "react";
 import { useApp } from "@/components/providers";
 import { ErrorBox, PageTitle } from "@/components/ui";
 import { api, del, download, post } from "@/lib/api";
+import { timeLeft } from "@/lib/guest";
 import type { TwoFactorStatus } from "@/lib/types";
 import { TwoFactorCard } from "./TwoFactorCard";
 
 export default function AccountPage() {
   const { auth } = useApp();
   const [twoFactor, setTwoFactor] = useState<TwoFactorStatus | null>(null);
-  const signedIn = Boolean(auth?.user);
+  // 체험 계정은 2단계 인증을 쓸 수 없어 상태를 묻지 않는다
+  const signedIn = Boolean(auth?.user) && !auth?.user?.guest;
   const loadTwoFactor = useCallback(() => {
     api<TwoFactorStatus>("/api/auth/2fa")
       .then(setTwoFactor)
@@ -21,6 +24,7 @@ export default function AccountPage() {
   }, [signedIn, loadTwoFactor]);
 
   if (!auth?.user) return <p className="card text-sm">로그인 없이 쓰는 설정에서는 계정 화면이 없습니다.</p>;
+  if (auth.user.guest) return <GuestAccount />;
   return (
     <div className="max-w-lg space-y-4">
       <PageTitle title="계정" sub={auth.user.email} />
@@ -29,6 +33,48 @@ export default function AccountPage() {
       <TwoFactorCard status={twoFactor} reload={loadTwoFactor} />
       <ExportCard />
       <DeleteAccount needsCode={Boolean(twoFactor?.enabled)} />
+    </div>
+  );
+}
+
+// 체험 계정: 언제 지워지는지, 가입하면 무엇을 더 쓰는지, 체험 끝내기
+function GuestAccount() {
+  const { auth, logout } = useApp();
+  const [busy, setBusy] = useState(false);
+  return (
+    <div className="max-w-lg space-y-4">
+      <PageTitle title="계정" sub="가입 없이 체험하는 중" />
+      <section className="card space-y-3" aria-labelledby="guest-title">
+        <h2 id="guest-title" className="font-semibold">
+          체험 계정
+        </h2>
+        <p className="text-sm">
+          이메일과 비밀번호 없이 만든 임시 계정입니다. 질문·답변 기록과 관심 종목은 {timeLeft(auth?.user?.guest_expires_at)} 뒤 모두
+          지워집니다.
+        </p>
+        <p className="text-sm text-muted">
+          공시 알림(이메일·텔레그램·웹 푸시), 비밀번호, 2단계 인증, 내 데이터 내려받기는 가입한 계정에서만 쓸 수 있습니다.
+          {auth?.allow_signup ? " 가입하면 지금까지의 기록이 그대로 이어집니다." : ""}
+        </p>
+        <div className="flex flex-wrap gap-2">
+          {auth?.allow_signup ? (
+            <Link href="/signup?next=%2Faccount" className="btn btn-primary">
+              가입하기
+            </Link>
+          ) : null}
+          <button
+            type="button"
+            className="btn"
+            disabled={busy}
+            onClick={async () => {
+              setBusy(true);
+              await logout();
+            }}
+          >
+            {busy ? "지우는 중…" : "체험 끝내기 (기록 바로 지우기)"}
+          </button>
+        </div>
+      </section>
     </div>
   );
 }

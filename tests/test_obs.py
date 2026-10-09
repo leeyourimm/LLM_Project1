@@ -49,6 +49,7 @@ def test_metrics_endpoint_counts_routes_and_reads_state():
         "dart_calls_today": 120,
         "dart_daily_limit": 20000,
         "users": 3,
+        "guests": 2,
         "eval": {
             "finished_at": datetime.now(UTC),
             "summary": {"overall": {"pass_rate": 0.85}},
@@ -75,6 +76,7 @@ def test_metrics_endpoint_counts_routes_and_reads_state():
     assert "dartrag_dart_calls_today 120.0" in body
     assert 'dartrag_eval_metric{metric="pass_rate"} 0.85' in body
     assert "dartrag_eval_release_passed 1.0" in body
+    assert "dartrag_users 3.0" in body and "dartrag_guests 2.0" in body
 
 
 def test_metrics_survive_state_errors_and_need_token():

@@ -29,20 +29,20 @@ from fastapi.staticfiles import StaticFiles
 from prometheus_client import CONTENT_TYPE_LATEST, CollectorRegistry, generate_latest
 from pydantic import BaseModel, Field
 
+from dartrag.accounts import forget_traces as forget_user_traces
 from dartrag.obs import metrics
 from dartrag.obs.metrics import StateCollector
 from dartrag.search import SearchFilter
-from dartrag.web import account_mail, auth, two_factor
+from dartrag.web import account_mail, auth, guest, two_factor
 from dartrag.web.alerts import build_routers as build_alert_routers
 from dartrag.web.chat import DISCLAIMER, build_router
 from dartrag.web.chat import source_dict as _source
 from dartrag.web.insights import build_router as build_insights_router
-from dartrag.web.ratelimit import RateLimiter, Rule, make_dependency
+from dartrag.web.ratelimit import RateLimiter, Rule, client_key, make_dependency
 from dartrag.web.services import Services
 
 log = logging.getLogger(__name__)
 STATIC = pathlib.Path(__file__).parent / "static"
-log = logging.getLogger(__name__)
 
 # 같은 주소로 재설정 메일이 쏟아지지 않게 주소별로도 센다 (넘어도 응답은 같고 메일만 안 보냄)
 RESET_MAIL_RULE = Rule(3, 3600, "1시간에 3번")
@@ -86,7 +86,12 @@ class SecondFactor(BaseModel):
 @dataclass(frozen=True)
 class User:
     id: int
-    email: str
+    email: str | None  # 체험 계정은 None
+    guest_until: datetime | None = None  # 체험 계정이 끝나는 시각 (가입한 계정은 None)
+
+    @property
+    def guest(self) -> bool:
+        return self.guest_until is not None
 
 
 SECURITY_HEADERS = {
@@ -158,12 +163,16 @@ def create_app(services: Services, limiter: auth.LoginLimiter | None = None) -> 
         return User(*row) if row else None
 
     def current_user(request: Request) -> User | None:
-        """로그인을 쓰지 않으면 None(운영자 본인), 쓰면 로그인한 사용자. 없으면 401."""
+        """로그인을 쓰지 않으면 None(운영자 본인), 쓰면 로그인한 사용자. 없으면 401.
+
+        체험 계정이 쓸 수 없는 기능(web/guest.py 의 GUEST_BLOCKED)이면 403."""
         if not services.auth_required:
             return None
         user = session_user(request)
         if user is None:
             raise HTTPException(401, "로그인이 필요합니다")
+        if user.guest and (detail := guest.blocked_detail(request, services.allow_signup)):
+            raise HTTPException(403, detail)
         return user
 
     CurrentUser = Annotated[User | None, Depends(current_user)]
@@ -175,22 +184,43 @@ def create_app(services: Services, limiter: auth.LoginLimiter | None = None) -> 
 
     rate_limiter = RateLimiter(services.redis() if services.redis else None)
 
+    def guest_address(request: Request, user: User | None) -> str | None:
+        """체험 계정의 요청만 접속 주소별로 센다 (체험 계정을 새로 만들어도 한도가 차지 않게)."""
+        return client_key(request, None) if user is not None and user.guest else None
+
     def rate(scope: str, when=None):
+        """요청 한도. 체험 계정에 더하는 규칙("guest:<범위>")이 있으면 그것도 함께 센다."""
         rules = services.limits.get(scope, [])
-        return Depends(make_dependency(rate_limiter, scope, rules, maybe_user, when))
+        member = make_dependency(rate_limiter, scope, rules, maybe_user, when)
+        guest_rules = services.limits.get(f"guest:{scope}")
+        if not guest_rules:
+            return Depends(member)
+        extra = make_dependency(
+            rate_limiter, f"guest:{scope}", guest_rules, maybe_user, when, who=guest_address
+        )
+
+        def both(_m: Annotated[None, Depends(member)], _g: Annotated[None, Depends(extra)]):
+            return None
+
+        return Depends(both)
+
+    def address_only(request: Request) -> None:
+        """접속 주소별로만 셀 때 (로그인한 사용자여도 사용자별로 세지 않는다)."""
+        return None
 
     def uid(user: User | None) -> int | None:
         return user.id if user else None
 
-    def start_session(response: Response, user_id: int) -> None:
+    def start_session(response: Response, user_id: int, until: datetime | None = None) -> None:
+        """until: 체험 계정처럼 세션이 끝날 시각을 정할 때 (기본은 SESSION_DAYS 뒤)."""
         token, hashed = auth.new_session_token()
-        expires = datetime.now(UTC) + timedelta(days=services.session_days)
+        expires = until or datetime.now(UTC) + timedelta(days=services.session_days)
         with services.repo() as repo:
             repo.create_session(hashed, user_id, expires)
         response.set_cookie(
             auth.SESSION_COOKIE,
             token,
-            max_age=services.session_days * 86400,
+            max_age=max(int((expires - datetime.now(UTC)).total_seconds()), 1),
             httponly=True,
             samesite="lax",
             secure=services.cookie_secure,
@@ -302,16 +332,25 @@ def create_app(services: Services, limiter: auth.LoginLimiter | None = None) -> 
             )
             send_mail(background, email, mail, "새 기기 로그인")
 
+    def guest_info(user: User) -> dict:
+        return {"email": None, "guest": True, "guest_expires_at": user.guest_until}
+
     @app.get("/api/auth/me")
     def me(request: Request):
         user = session_user(request) if services.auth_required else None
+        guest_open = services.auth_required and services.allow_guest
         info = None
-        if user:
+        if user and user.guest:
+            info = guest_info(user)
+        elif user:
             with services.repo() as repo:
                 info = {"email": user.email, "email_verified": repo.email_verified(user.id)}
         return {
             "auth_required": services.auth_required,
             "allow_signup": services.allow_signup,
+            # 로그인 화면에 "가입 없이 체험하기"를 보일지, 체험 계정을 몇 시간 쓰는지
+            "allow_guest": guest_open,
+            "guest_hours": services.guest_hours if guest_open else None,
             # 메일 발송이 설정됐는지 (비밀번호 재설정, 이메일 인증 화면이 쓴다)
             "email_enabled": services.auth_required and email_sender() is not None,
             "email_verification_required": services.auth_required and verification_enforced(),
@@ -320,6 +359,8 @@ def create_app(services: Services, limiter: auth.LoginLimiter | None = None) -> 
 
     @app.post("/api/auth/signup", status_code=201, dependencies=[rate("auth")])
     def signup(req: Credentials, request: Request, response: Response, background: BackgroundTasks):
+        """가입. 체험 계정으로 로그인한 채 가입하면 그 계정을 그대로 가입 계정으로 바꿔
+        대화 기록과 관심 종목을 이어 쓴다."""
         need_auth_mode()
         if not services.allow_signup:
             raise HTTPException(403, "지금은 가입을 받지 않습니다. 관리자에게 계정을 요청하세요")
@@ -328,8 +369,13 @@ def create_app(services: Services, limiter: auth.LoginLimiter | None = None) -> 
             auth.check_password_policy(req.password)
         except auth.AuthError as e:
             raise HTTPException(422, str(e)) from None
+        trial = session_user(request)
+        hashed = auth.hash_password(req.password)
         with services.repo() as repo:
-            user_id = repo.create_user(email, auth.hash_password(req.password))
+            if trial is not None and trial.guest:
+                user_id = trial.id if repo.upgrade_guest(trial.id, email, hashed) else None
+            else:
+                user_id = repo.create_user(email, hashed)
         if user_id is None:
             raise HTTPException(409, "이미 가입된 이메일입니다")
         start_session(response, user_id)
@@ -337,6 +383,38 @@ def create_app(services: Services, limiter: auth.LoginLimiter | None = None) -> 
         if email_sender() is not None:
             send_verification(background, user_id, email)
         return {"user": {"email": email, "email_verified": False}}
+
+    @app.post(
+        "/api/auth/guest",
+        status_code=201,
+        dependencies=[
+            Depends(
+                make_dependency(
+                    rate_limiter,
+                    "guest",
+                    services.limits.get("guest", []),
+                    address_only,
+                )
+            )
+        ],
+    )
+    def start_guest(request: Request, response: Response):
+        """가입 없이 체험하기: 이메일·비밀번호 없는 체험 계정을 만들고 로그인한다.
+
+        GUEST_HOURS 가 지나면 로그인이 끊기고 작업자가 기록과 함께 지운다. 만들기 횟수는
+        로그인 여부와 관계없이 접속 주소별로 센다. 이미 로그인한 브라우저면 그대로 둔다."""
+        need_auth_mode()
+        if not services.allow_guest:
+            raise HTTPException(403, "지금은 가입 없이 체험하기를 열지 않았습니다")
+        current = session_user(request)
+        if current is not None:
+            response.status_code = 200
+            return {"user": guest_info(current) if current.guest else {"email": current.email}}
+        until = datetime.now(UTC) + timedelta(hours=services.guest_hours)
+        with services.repo() as repo:
+            user_id = repo.create_guest(until)
+        start_session(response, user_id, until)
+        return {"user": guest_info(User(user_id, None, until))}
 
     @app.post("/api/auth/login")
     def login(req: Credentials, request: Request, response: Response, background: BackgroundTasks):
@@ -492,11 +570,17 @@ def create_app(services: Services, limiter: auth.LoginLimiter | None = None) -> 
         return {"ok": True, "sent_to": user.email}
 
     @app.post("/api/auth/logout")
-    def logout(request: Request, response: Response):
+    def logout(request: Request, response: Response, background: BackgroundTasks):
+        """로그아웃. 체험 계정은 다시 들어올 방법(이메일·비밀번호)이 없으므로 기록과 함께 바로
+        지운다 (탈퇴와 같은 경로)."""
         token = request.cookies.get(auth.SESSION_COOKIE)
+        user = session_user(request) if token and services.auth_required else None
         if token:
             with services.repo() as repo:
                 repo.delete_session(auth.token_hash(token))
+                ended = user is not None and user.guest and repo.delete_user(user.id)
+            if ended and services.tracer is not None:
+                background.add_task(forget_traces, user.id)
         clear_session_cookie(response)
         return {"ok": True}
 
@@ -540,10 +624,7 @@ def create_app(services: Services, limiter: auth.LoginLimiter | None = None) -> 
         return {"ok": True}
 
     def forget_traces(user_id: int) -> None:
-        try:
-            services.tracer().forget_user(user_id)
-        except Exception as e:  # noqa: BLE001 - 추적 삭제 실패로 탈퇴 응답이 깨지면 안 된다
-            log.warning("탈퇴 후 추적 삭제 실패: %s", type(e).__name__)
+        forget_user_traces(services.tracer(), user_id)
 
     @api.get("/api/account/export", dependencies=[rate("heavy")])
     def export_account(user: CurrentUser):
@@ -575,6 +656,11 @@ def create_app(services: Services, limiter: auth.LoginLimiter | None = None) -> 
     @app.get("/api/health")
     def health():
         return {"ok": True}
+
+    @api.get("/api/examples")
+    def examples():
+        """채팅 첫 화면의 예시 질문 (EXAMPLE_QUESTIONS). 작업자가 답을 캐시에 미리 넣어 둔다."""
+        return {"questions": list(services.examples)}
 
     state = CollectorRegistry()
     if services.ops_snapshot is not None:
