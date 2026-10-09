@@ -8,7 +8,16 @@ from dartrag.dart.reports import PeriodicReport
 from dartrag.parsing import Chunk
 from dartrag.search.types import IndexedChunk
 
-SCHEMA_DIR = Path(__file__).resolve().parents[3] / "infra" / "db"
+
+def _schema_dir() -> Path:
+    """설치한 패키지(배포 이미지)에는 wheel 에 함께 넣은 schema/ (pyproject 의 force-include),
+    저장소에서 바로 돌릴 때(pip install -e)는 infra/db."""
+    here = Path(__file__).resolve().parent
+    packaged = here / "schema"
+    return packaged if packaged.is_dir() else here.parents[2] / "infra" / "db"
+
+
+SCHEMA_DIR = _schema_dir()
 
 
 class Repository:
@@ -20,7 +29,11 @@ class Repository:
         return cls(psycopg.connect(url))
 
     def migrate(self) -> None:
-        for path in sorted(SCHEMA_DIR.glob("*.sql")):
+        paths = sorted(SCHEMA_DIR.glob("*.sql"))
+        if not paths:
+            # 없는데 그냥 넘어가면 "스키마 적용 완료"라고 하고 아무것도 적용하지 않는다
+            raise RuntimeError(f"DB 스키마 파일(*.sql)을 찾지 못했습니다: {SCHEMA_DIR}")
+        for path in paths:
             self.conn.execute(path.read_text())
         self.conn.commit()
 

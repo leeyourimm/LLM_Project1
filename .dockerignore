@@ -17,6 +17,8 @@ dist/
 docs/
 tests/
 infra/
+# DB 스키마는 패키지에 넣는다 (pyproject 의 force-include)
+!infra/db/
 frontend/
 **/node_modules
 **/.next
