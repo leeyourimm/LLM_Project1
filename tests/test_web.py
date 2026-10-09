@@ -579,6 +579,27 @@ def test_security_headers_and_cross_site_block(ctx):
     assert same.status_code == 201
 
 
+def test_allowed_origin_for_separate_frontend():
+    repo = FakeRepo()
+
+    @contextmanager
+    def repo_cm():
+        yield repo
+
+    services = Services(
+        repo_cm,
+        lambda r: FakeAnswerer(),
+        lambda r: FakeRetriever(),
+        allowed_origins=("http://localhost:3000",),
+    )
+    client = TestClient(create_app(services))
+    body = {"stock": "005930"}
+    ok = client.post("/api/watchlist", json=body, headers={"Origin": "http://localhost:3000"})
+    assert ok.status_code == 201
+    bad = client.post("/api/watchlist", json=body, headers={"Origin": "http://localhost:4000"})
+    assert bad.status_code == 403
+
+
 def test_password_hashing():
     from dartrag.web import auth
 

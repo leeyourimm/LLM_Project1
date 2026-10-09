@@ -55,6 +55,7 @@ class Settings(BaseSettings):
 
     # 메일 속 링크(인증, 구독 취소)에 쓰는 서비스 주소와 서명용 비밀값
     public_url: str = "http://127.0.0.1:8000"
+    allowed_origins: str = ""  # 쉼표로 구분, 예: http://localhost:3000
     secret_key: str = ""
 
     # 로그인. 인터넷에 공개할 때만 AUTH_REQUIRED=true 로 켠다

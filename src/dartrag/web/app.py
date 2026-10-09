@@ -68,7 +68,11 @@ def create_app(services: Services, limiter: auth.LoginLimiter | None = None) -> 
         # 다른 사이트가 사용자 브라우저를 통해 몰래 보내는 요청(CSRF)을 막는다
         if request.method in UNSAFE_METHODS:
             origin = request.headers.get("origin")
-            if origin and urlsplit(origin).netloc != request.headers.get("host"):
+            if (
+                origin
+                and urlsplit(origin).netloc != request.headers.get("host")
+                and origin.rstrip("/") not in services.allowed_origins
+            ):
                 return JSONResponse({"detail": "다른 사이트에서 온 요청은 받지 않습니다"}, 403)
         response = await call_next(request)
         response.headers.update(SECURITY_HEADERS)
