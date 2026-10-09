@@ -68,6 +68,57 @@ jobs:
         env:
           NEXT_TELEMETRY_DISABLED: "1"
 
+  # 브라우저 종단 테스트: 실제 FastAPI(가짜 검색·언어 모델) + Postgres + next start 를 Chromium 으로
+  # 가입 → 로그인 → 질문 → 내 데이터 내려받기 → 탈퇴, 로그인 뒤 돌아갈 주소 검사
+  e2e:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: dartrag
+          POSTGRES_PASSWORD: dartrag
+          POSTGRES_DB: dartrag_e2e
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U dartrag -d dartrag_e2e"
+          --health-interval 5s
+          --health-retries 10
+    env:
+      E2E_DATABASE_URL: postgresql://dartrag:dartrag@localhost:5432/dartrag_e2e
+      NEXT_TELEMETRY_DISABLED: "1"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install -e ".[dev]"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - run: npm ci
+        working-directory: frontend
+      # /api 를 테스트용 백엔드(8765)로 넘기도록 빌드
+      - run: npm run build
+        working-directory: frontend
+        env:
+          API_ORIGIN: http://127.0.0.1:8765
+      - run: npx playwright install --with-deps chromium
+        working-directory: frontend
+      - run: npm run e2e
+        working-directory: frontend
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: playwright-report
+          path: |
+            frontend/playwright-report
+            frontend/test-results
+          retention-days: 7
+
   # 배포 이미지가 빌드되는지, 배포용 compose·Caddyfile 이 올바른지 확인 (이미지는 올리지 않음)
   docker:
     runs-on: ubuntu-latest

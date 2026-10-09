@@ -4,3 +4,5 @@ node_modules
 .env.*
 Dockerfile
 .dockerignore
+test-results
+playwright-report
