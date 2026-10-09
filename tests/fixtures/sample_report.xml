@@ -1,0 +1,29 @@
+<?xml version="1.0" encoding="utf-8"?>
+<DOCUMENT>
+<DOCUMENT-NAME ACODE="11011">사업보고서</DOCUMENT-NAME>
+<COMPANY-NAME AREGCIK="00126380">삼성전자주식회사</COMPANY-NAME>
+<BODY>
+<COVER><COVER-TITLE>사 업 보 고 서</COVER-TITLE></COVER>
+<SECTION-1 ACLASS="MANDATORY"><TITLE ATOC="Y">I. 회사의 개요</TITLE>
+  <SECTION-2><TITLE ATOC="Y">1. 회사의 개요</TITLE>
+    <P>당사는 1969년 1월 13일에 설립되었습니다.</P>
+    <P>본점 소재지는 경기도 수원시 영통구 삼성로 129입니다.</P>
+  </SECTION-2>
+</SECTION-1>
+<SECTION-1><TITLE ATOC="Y">II. 사업의 내용</TITLE>
+  <SECTION-2><TITLE ATOC="Y">1. 사업의 개요</TITLE>
+    <P>당사는 DX 부문과 DS 부문으로 구성되어 있습니다 & 각 부문은 독립적으로 운영됩니다.</P>
+    <P>(단위 : 억원)</P>
+    <TABLE BORDER="1">
+      <TBODY>
+        <TR><TH ROWSPAN="2">부문</TH><TH COLSPAN="2">매출액</TH></TR>
+        <TR><TH>2024년</TH><TH>2023년</TH></TR>
+        <TR><TD>DX</TD><TE>1,747,887</TE><TE>1,698,992</TE></TR>
+        <TR><TD>DS</TD><TE>1,110,660</TE><TE>665,945</TE></TR>
+      </TBODY>
+    </TABLE>
+    <P>매출 비중은 DX 부문이 가장 큽니다.</P>
+  </SECTION-2>
+</SECTION-1>
+</BODY>
+</DOCUMENT>

@@ -5,6 +5,7 @@ import psycopg
 
 from dartrag.dart.models import Corp, Filing
 from dartrag.dart.reports import PeriodicReport
+from dartrag.parsing import Chunk
 
 SCHEMA_DIR = Path(__file__).resolve().parents[3] / "infra" / "db"
 
@@ -101,3 +102,59 @@ class Repository:
                 items,
             )
         return len(items)
+
+    def filings_to_parse(self, parser_version: int, corp_codes: list[str] | None = None):
+        """원문이 있고 아직 이 버전 파서로 처리하지 않은 공시."""
+        query = """
+            SELECT f.rcept_no, f.corp_code, c.corp_name, f.report_kind, f.period_key, f.raw_key
+            FROM filings f JOIN companies c USING (corp_code)
+            WHERE f.raw_key IS NOT NULL
+              AND (f.parser_version IS NULL OR f.parser_version < %s)
+        """
+        params: list = [parser_version]
+        if corp_codes:
+            query += " AND f.corp_code = ANY(%s)"
+            params.append(corp_codes)
+        return self.conn.execute(query + " ORDER BY f.rcept_dt", params).fetchall()
+
+    def replace_chunks(
+        self,
+        rcept_no: str,
+        corp_code: str,
+        chunks_by_file: list[tuple[str, list[Chunk]]],
+        parser_version: int,
+    ) -> int:
+        """한 공시의 청크를 통째로 교체하고 파싱 완료로 표시."""
+        rows = [
+            {
+                "chunk_id": c.chunk_id,
+                "rcept_no": rcept_no,
+                "corp_code": corp_code,
+                "source_file": source_file,
+                "ord": c.ord,
+                "kind": c.kind,
+                "section_path": c.section_path,
+                "context": c.context,
+                "body": c.body,
+                "unit": c.unit,
+                "char_count": len(c.body),
+            }
+            for source_file, chunks in chunks_by_file
+            for c in chunks
+        ]
+        with self.conn.transaction(), self.conn.cursor() as cur:
+            cur.execute("DELETE FROM chunks WHERE rcept_no = %s", (rcept_no,))
+            cur.executemany(
+                """
+                INSERT INTO chunks (chunk_id, rcept_no, corp_code, source_file, ord, kind,
+                    section_path, context, body, unit, char_count)
+                VALUES (%(chunk_id)s, %(rcept_no)s, %(corp_code)s, %(source_file)s, %(ord)s,
+                    %(kind)s, %(section_path)s, %(context)s, %(body)s, %(unit)s, %(char_count)s)
+                """,
+                rows,
+            )
+            cur.execute(
+                "UPDATE filings SET parsed_at = now(), parser_version = %s WHERE rcept_no = %s",
+                (parser_version, rcept_no),
+            )
+        return len(rows)

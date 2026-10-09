@@ -7,6 +7,7 @@ from dartrag.config import get_settings
 from dartrag.dart import DartApiError, OpenDartClient
 from dartrag.db import Repository
 from dartrag.pipeline.collect import collect
+from dartrag.pipeline.parse import parse_filings
 from dartrag.storage import make_raw_store
 
 app = typer.Typer(help="DART 공시 분석 서비스 도구")
@@ -76,6 +77,20 @@ def collect_cmd(
     )
     for line in summary.skipped:
         typer.echo(f"건너뜀: {line}")
+    for line in summary.errors:
+        typer.echo(f"오류: {line}", err=True)
+    raise typer.Exit(1 if summary.errors else 0)
+
+
+@app.command()
+def parse():
+    """수집한 원문을 섹션·표 단위 청크로 나눠 저장."""
+    logging.basicConfig(level=logging.INFO)
+    settings = get_settings()
+    repo = Repository.connect(settings.database_url)
+    repo.migrate()
+    summary = parse_filings(repo, make_raw_store(settings))
+    typer.echo(f"공시 {summary.filings}건, 청크 {summary.chunks}개")
     for line in summary.errors:
         typer.echo(f"오류: {line}", err=True)
     raise typer.Exit(1 if summary.errors else 0)
