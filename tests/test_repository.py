@@ -18,7 +18,7 @@ pytestmark = pytest.mark.skipif(not URL, reason="TEST_DATABASE_URL 없음")
 def repo():
     conn = psycopg.connect(URL)
     conn.execute(
-        "DROP TABLE IF EXISTS data_issues, job_runs, backfill_state, diff_summaries, "
+        "DROP TABLE IF EXISTS eval_runs, data_issues, job_runs, backfill_state, diff_summaries, "
         "user_notifications, user_alert_channels, "
         "feedback, messages, conversations, sessions, user_watchlist, "
         "users, notifications, watchlist, disclosures, chunks, financial_items, filings, "
@@ -549,3 +549,19 @@ def test_backfill_jobs_and_issues(repo):
     repo.replace_issues("00126380", [])
     assert repo.data_issues() == []
     assert repo.purge_expired_sessions() == 0 and repo.purge_user_notifications(90) == 0
+
+
+def test_ops_snapshot_and_eval_runs(repo):
+    from dartrag.finance.validate import Issue
+
+    repo.finish_job(repo.start_job("feed_poll"), "ok", {})
+    repo.replace_issues("00126380", [Issue("00126380", 2024, "11011", "CFS", "jump", "warn", "x")])
+    snap = repo.ops_snapshot()
+    assert snap["jobs"][0]["name"] == "feed_poll" and snap["jobs"][0]["status"] == "ok"
+    assert snap["issues"] == {"error": 0, "warn": 1}
+    assert snap["ingest_backlog"] == 0 and snap["users"] == 0 and "eval" not in snap
+
+    repo.save_eval_run({"llm": "a"}, {"overall": {"pass_rate": 0.7}}, False)
+    repo.save_eval_run({"llm": "b"}, {"overall": {"pass_rate": 0.9}}, True)
+    latest = repo.ops_snapshot()["eval"]
+    assert latest["meta"] == {"llm": "b"} and latest["passed"] is True

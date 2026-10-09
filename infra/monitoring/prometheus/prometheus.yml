@@ -1,0 +1,14 @@
+# 개발용: 내 컴퓨터에서 dartrag serve 로 띄운 API(8000번)를 15초마다 읽는다.
+# 배포용 설정은 prometheus.prod.yml (api 컨테이너를 읽음)
+global:
+  scrape_interval: 15s
+  evaluation_interval: 30s
+
+rule_files:
+  - /etc/prometheus/alerts.yml
+
+scrape_configs:
+  - job_name: dartrag-api
+    metrics_path: /metrics
+    static_configs:
+      - targets: ["host.docker.internal:8000"]

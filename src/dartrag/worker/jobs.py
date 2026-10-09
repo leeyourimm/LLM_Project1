@@ -234,3 +234,50 @@ def maintenance(ctx: Context, repo):
         "user_notifications": repo.purge_user_notifications(90),
         "job_runs": repo.purge_job_runs(90),
     }
+
+
+def evaluate(ctx: Context, repo, limit: int | None = None, eval_dir: str = "eval"):
+    """정기 평가: 직접 쓴 문항과 재무 DB 로 새로 만든 숫자 문항 일부로 답변 품질을 잰다.
+
+    결과는 eval_runs 에 쌓여 대시보드의 품질 추이와 배포 기준 판정에 쓰인다."""
+    import random
+    from pathlib import Path
+
+    from dartrag.answer.prompt import PROMPT_VERSION
+    from dartrag.eval import load_cases
+    from dartrag.eval.generate import generate_cases, load_values
+    from dartrag.eval.service import run_and_record
+    from dartrag.factory import build_answerer
+
+    s = ctx.settings
+    limit = limit or s.eval_schedule_cases
+    manual = load_cases(Path(eval_dir) / "manual.jsonl")
+    companies = repo.listed_companies()
+    # 주마다 다른 숫자 문항을 뽑아 특정 문항에만 맞춘 개선을 막는다
+    week = date.today().isocalendar()
+    seed = week.year * 100 + week.week
+    generated = generate_cases(
+        companies, load_values(repo, [c for c, _ in companies]), per_company=4, seed=seed
+    )
+    rng = random.Random(seed)
+    n_generated = min(len(generated), limit // 2)
+    cases = rng.sample(manual, min(len(manual), limit - n_generated)) + rng.sample(
+        generated, n_generated
+    )
+    meta = {
+        "llm": s.llm_model,
+        "embed": s.embed_model,
+        "rerank": s.rerank_model or "-",
+        "prompt": PROMPT_VERSION,
+        "cases": len(cases),
+        "files": f"scheduled (seed {seed})",
+    }
+    answerer = build_answerer(ctx.backends, repo, use_cache=False)
+    result = run_and_record(repo, answerer, cases, Path("reports/eval"), meta)
+    return {
+        "cases": len(cases),
+        "pass_rate": result["summary"]["overall"]["pass_rate"],
+        "passed": result["passed"],
+        "failed_checks": [c.name for c in result["checks"] if not c.ok],
+        "report": str(result["report"]),
+    }

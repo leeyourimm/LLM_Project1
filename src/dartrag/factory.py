@@ -97,7 +97,15 @@ def build_answerer(backends: Backends, repo: Repository, *, use_cache: bool = Tr
             qdrant=backends.qdrant if s.semantic_cache else None,
             embed=backends.embedder.embed_query if s.semantic_cache else None,
         )
-    return Answerer(build_retriever(backends, repo), llm, finance=FinanceTool(repo), cache=cache)
+    from dartrag.obs.tracing import get_tracer
+
+    return Answerer(
+        build_retriever(backends, repo),
+        llm,
+        finance=FinanceTool(repo),
+        cache=cache,
+        tracer=get_tracer(s),
+    )
 
 
 def build_llm(settings: Settings):

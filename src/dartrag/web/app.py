@@ -3,23 +3,29 @@
 화면은 빌드 도구 없이 바로 열 수 있게 정적 HTML·JS 한 벌로 만들었다 (static/).
 """
 
+import hmac
 import pathlib
+import time
 from dataclasses import asdict, dataclass
 from datetime import UTC, date, datetime, timedelta
 from typing import Annotated
 from urllib.parse import urlsplit
 
 from fastapi import APIRouter, Depends, FastAPI, HTTPException, Path, Query, Request, Response
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse
 from fastapi.staticfiles import StaticFiles
+from prometheus_client import CONTENT_TYPE_LATEST, CollectorRegistry, generate_latest
 from pydantic import BaseModel, Field
 
+from dartrag.obs import metrics
+from dartrag.obs.metrics import StateCollector
 from dartrag.search import SearchFilter
 from dartrag.web import auth
 from dartrag.web.alerts import build_routers as build_alert_routers
 from dartrag.web.chat import DISCLAIMER, build_router
 from dartrag.web.chat import source_dict as _source
 from dartrag.web.insights import build_router as build_insights_router
+from dartrag.web.ratelimit import RateLimiter, make_dependency
 from dartrag.web.services import Services
 
 STATIC = pathlib.Path(__file__).parent / "static"
@@ -74,7 +80,14 @@ def create_app(services: Services, limiter: auth.LoginLimiter | None = None) -> 
                 and origin.rstrip("/") not in services.allowed_origins
             ):
                 return JSONResponse({"detail": "다른 사이트에서 온 요청은 받지 않습니다"}, 403)
+        started = time.perf_counter()
         response = await call_next(request)
+        # 경로 대신 라우트 이름(/api/company/{stock})으로 세야 지표 종류가 끝없이 늘지 않는다
+        route = request.scope.get("route")
+        path = getattr(route, "path", None) or "unmatched"
+        if path != "/metrics":
+            metrics.HTTP_REQUESTS.labels(request.method, path, str(response.status_code)).inc()
+            metrics.HTTP_SECONDS.labels(request.method, path).observe(time.perf_counter() - started)
         response.headers.update(SECURITY_HEADERS)
         if not request.url.path.startswith("/api/docs"):
             response.headers["Content-Security-Policy"] = CSP
@@ -99,6 +112,16 @@ def create_app(services: Services, limiter: auth.LoginLimiter | None = None) -> 
 
     CurrentUser = Annotated[User | None, Depends(current_user)]
     api = APIRouter(dependencies=[Depends(current_user)])
+
+    def maybe_user(request: Request) -> User | None:
+        """요청 한도용: 로그인하지 않았어도 오류 없이 None."""
+        return session_user(request) if services.auth_required else None
+
+    rate_limiter = RateLimiter(services.redis() if services.redis else None)
+
+    def rate(scope: str, when=None):
+        rules = services.limits.get(scope, [])
+        return Depends(make_dependency(rate_limiter, scope, rules, maybe_user, when))
 
     def uid(user: User | None) -> int | None:
         return user.id if user else None
@@ -131,7 +154,7 @@ def create_app(services: Services, limiter: auth.LoginLimiter | None = None) -> 
             "user": {"email": user.email} if user else None,
         }
 
-    @app.post("/api/auth/signup", status_code=201)
+    @app.post("/api/auth/signup", status_code=201, dependencies=[rate("auth")])
     def signup(req: Credentials, response: Response):
         need_auth_mode()
         if not services.allow_signup:
@@ -175,7 +198,7 @@ def create_app(services: Services, limiter: auth.LoginLimiter | None = None) -> 
         response.delete_cookie(auth.SESSION_COOKIE, path="/")
         return {"ok": True}
 
-    @api.post("/api/auth/password")
+    @api.post("/api/auth/password", dependencies=[rate("auth")])
     def change_password(req: PasswordChange, user: CurrentUser, response: Response):
         need_auth_mode()
         with services.repo() as repo:
@@ -201,6 +224,20 @@ def create_app(services: Services, limiter: auth.LoginLimiter | None = None) -> 
     @app.get("/api/health")
     def health():
         return {"ok": True}
+
+    state = CollectorRegistry()
+    if services.ops_snapshot is not None:
+        state.register(StateCollector(services.ops_snapshot))
+
+    @app.get("/metrics", include_in_schema=False)
+    def metrics_endpoint(request: Request):
+        """Prometheus 수집용. 공개 서버에서는 프록시가 바깥 접근을 막는다."""
+        if services.metrics_token:
+            given = request.headers.get("authorization", "").removeprefix("Bearer ").strip()
+            if not hmac.compare_digest(given, services.metrics_token):
+                raise HTTPException(401, "metrics token required")
+        body = generate_latest(metrics.REGISTRY) + generate_latest(state)
+        return PlainTextResponse(body, media_type=CONTENT_TYPE_LATEST)
 
     @api.get("/api/companies")
     def companies():
@@ -340,8 +377,8 @@ def create_app(services: Services, limiter: auth.LoginLimiter | None = None) -> 
             "disclaimer": DISCLAIMER,
         }
 
-    api.include_router(build_router(services, CurrentUser, corp_codes))
-    api.include_router(build_insights_router(services))
+    api.include_router(build_router(services, CurrentUser, corp_codes, rate))
+    api.include_router(build_insights_router(services, rate))
     alerts_api, alerts_public = build_alert_routers(services, CurrentUser)
     api.include_router(alerts_api)
     app.include_router(alerts_public)

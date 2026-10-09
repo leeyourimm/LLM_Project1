@@ -10,7 +10,7 @@ from pydantic import BaseModel, Field
 
 from dartrag.changes.summary import DART_URL
 from dartrag.search import SearchFilter
-from dartrag.web.chat import DISCLAIMER, source_dict
+from dartrag.web.chat import DISCLAIMER, _no_limit, source_dict
 
 STOCK = r"^\d{6}$"
 COMPARE_TOPICS = {
@@ -25,7 +25,11 @@ class CompareSummaryRequest(BaseModel):
     topic: str = Field("business", pattern="^(" + "|".join(COMPARE_TOPICS) + ")$")
 
 
-def build_router(services) -> APIRouter:
+def _flag(name: str):
+    return lambda request: request.query_params.get(name, "").lower() in ("1", "true", "yes")
+
+
+def build_router(services, rate=_no_limit) -> APIRouter:
     router = APIRouter()
 
     def company_or_404(repo, stock: str) -> tuple[str, str, str]:
@@ -84,7 +88,7 @@ def build_router(services) -> APIRouter:
             "disclaimer": DISCLAIMER,
         }
 
-    @router.post("/api/compare/summary")
+    @router.post("/api/compare/summary", dependencies=[rate("heavy")])
     def compare_summary(req: CompareSummaryRequest):
         """여러 회사의 공시 본문을 근거로 한 비교 설명 (답변 모델 사용)."""
         from dartrag.answer import LLMError
@@ -113,7 +117,7 @@ def build_router(services) -> APIRouter:
             "disclaimer": DISCLAIMER,
         }
 
-    @router.get("/api/diff/summary")
+    @router.get("/api/diff/summary", dependencies=[rate("heavy", _flag("refresh"))])
     def diff_summary(
         stock: Annotated[str, Query(pattern=STOCK)],
         kind: Annotated[str, Query(pattern="^(사업보고서|반기보고서|분기보고서)$")] = "사업보고서",
@@ -144,7 +148,7 @@ def build_router(services) -> APIRouter:
             "disclaimer": DISCLAIMER,
         }
 
-    @router.get("/api/company/{stock}/report.pdf")
+    @router.get("/api/company/{stock}/report.pdf", dependencies=[rate("heavy", _flag("llm"))])
     def report_pdf(
         stock: Annotated[str, Path(pattern=STOCK)],
         llm: bool = False,

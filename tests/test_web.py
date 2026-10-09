@@ -274,7 +274,7 @@ class FakeAnswerer:
         self.fail = fail
         self.calls = []
 
-    def stream(self, question, flt):
+    def stream(self, question, flt, **kw):
         self.calls.append((question, flt))
         yield ("sources", [HIT])
         if self.fail:
@@ -286,7 +286,7 @@ class FakeAnswerer:
             check_citations(Answer(question, "DS 매출은 111조원입니다 [1].", hits=[HIT])),
         )
 
-    def answer(self, question, flt):
+    def answer(self, question, flt, **kw):
         self.calls.append((question, flt))
         if self.fail:
             raise LLMError("Ollama 에 연결할 수 없습니다.")

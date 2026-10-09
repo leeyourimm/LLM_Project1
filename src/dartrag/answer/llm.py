@@ -6,6 +6,7 @@ LLM 프로토콜(chat)만 구현하면 된다.
 
 import json
 import re
+import threading
 from collections.abc import Iterator
 from dataclasses import dataclass
 from typing import Protocol
@@ -51,6 +52,8 @@ class OllamaLLM:
         client: httpx.Client | None = None,
     ):
         self.name = model
+        # 마지막 호출의 토큰 수. 웹 서버는 여러 스레드가 같은 객체를 쓰므로 스레드마다 따로 둔다
+        self._usage = threading.local()
         self.temperature = temperature
         self.num_ctx = num_ctx
         self._client = client or httpx.Client(base_url=url, timeout=timeout)
@@ -74,16 +77,31 @@ class OllamaLLM:
             resp.read()
             raise LLMError(f"Ollama {resp.status_code}: {resp.text[:300]}")
 
+    def usage(self) -> dict | None:
+        """이 스레드에서 마지막으로 부른 chat/stream 의 {"input": n, "output": n}."""
+        return getattr(self._usage, "value", None)
+
+    def _record(self, data: dict) -> None:
+        if "prompt_eval_count" in data or "eval_count" in data:
+            self._usage.value = {
+                "input": data.get("prompt_eval_count", 0),
+                "output": data.get("eval_count", 0),
+            }
+
     def chat(self, messages: list[Message]) -> str:
+        self._usage.value = None
         try:
             resp = self._client.post("/api/chat", json=self._body(messages, False))
         except httpx.ConnectError as e:
             raise LLMError(CONNECT_ERROR) from e
         self._check(resp)
-        return _THINK_RE.sub("", resp.json()["message"]["content"]).strip()
+        data = resp.json()
+        self._record(data)
+        return _THINK_RE.sub("", data["message"]["content"]).strip()
 
     def stream(self, messages: list[Message]) -> Iterator[str]:
         """답변을 만들어지는 대로 조각씩 돌려준다."""
+        self._usage.value = None
         try:
             with self._client.stream("POST", "/api/chat", json=self._body(messages, True)) as resp:
                 self._check(resp)
@@ -97,6 +115,7 @@ class OllamaLLM:
                     if piece:
                         yield piece
                     if data.get("done"):
+                        self._record(data)
                         return
         except httpx.ConnectError as e:
             raise LLMError(CONNECT_ERROR) from e
