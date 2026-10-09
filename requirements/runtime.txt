@@ -535,9 +535,9 @@ httpx==0.28.1 \
     #   dartrag (pyproject.toml)
     #   huggingface-hub
     #   qdrant-client
-huggingface-hub==1.33.0 \
-    --hash=sha256:04e434b06e100eddbce9a6e817d72693a7884b10a79bd67ab48080d5c07eb899 \
-    --hash=sha256:367be21a201db9523eddf8aeac7048f2602c1b308691c97640d5e72ed188007e
+huggingface-hub==2.1.1 \
+    --hash=sha256:c56285bb7047ff1fe510f23be0705934fb3fd43afda75543341e6574a7e79630 \
+    --hash=sha256:d76fa1d8e6a59e01f012b1d88da604c099c7a0f2e26b1cc7d708f0a4283bd2a2
     # via
     #   sentence-transformers
     #   tokenizers
