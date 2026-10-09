@@ -194,3 +194,38 @@ def test_financial_rows_match_by_id_or_name(repo):
     assert sorted(r.amount for r in rows) == [100, 200]
     assert {r.account_nm for r in rows} == {"영업이익"}
     assert rows[0].bsns_year == 2024 and rows[0].fs_div == "CFS"
+
+
+def test_filing_pairs_for_diff(repo):
+    from dartrag.parsing import Chunk
+
+    repo.upsert_companies([Corp(corp_code="00126380", corp_name="삼성전자", stock_code="005930")])
+    for rcept_no, name, dt in [
+        ("20240312000001", "사업보고서 (2023.12)", date(2024, 3, 12)),
+        ("20240501000001", "[기재정정]사업보고서 (2023.12)", date(2024, 5, 1)),
+        ("20250311000001", "사업보고서 (2024.12)", date(2025, 3, 11)),
+        ("20250515000001", "분기보고서 (2025.03)", date(2025, 5, 15)),
+    ]:
+        f = Filing(
+            corp_code="00126380",
+            corp_name="삼성전자",
+            report_nm=name,
+            rcept_no=rcept_no,
+            rcept_dt=dt,
+        )
+        repo.upsert_filing(f, parse_report_name(name), "11011", "x.zip")
+        repo.replace_chunks(
+            rcept_no,
+            "00126380",
+            [(f"{rcept_no}.xml", [Chunk("c" + rcept_no, "text", ["I. 개요"], "ctx", "body", 0)])],
+            1,
+        )
+    # 정정공시가 있으면 그 기간의 마지막 접수본
+    assert repo.latest_filing_per_period("00126380", "사업보고서") == [
+        "20240501000001",
+        "20250311000001",
+    ]
+    info = repo.filing_info("20250311000001")
+    assert info["corp_name"] == "삼성전자" and info["parsed"] is True
+    assert repo.filing_info("00000000000000") is None
+    assert repo.chunk_rows("20250311000001") == [("20250311000001.xml", 0, ["I. 개요"], "body")]

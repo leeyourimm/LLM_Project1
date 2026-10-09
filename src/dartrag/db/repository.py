@@ -281,3 +281,33 @@ class Repository:
             (corp_codes, reprt_code, list(sj_divs), list(account_ids), list(account_names)),
         ).fetchall()
         return [FinancialRow(*r) for r in rows]
+
+    def filing_info(self, rcept_no: str) -> dict | None:
+        row = self.conn.execute(
+            """SELECT f.rcept_no, f.report_nm, f.rcept_dt, c.corp_name, f.parsed_at IS NOT NULL
+               FROM filings f JOIN companies c USING (corp_code) WHERE f.rcept_no = %s""",
+            (rcept_no,),
+        ).fetchone()
+        if row is None:
+            return None
+        keys = ("rcept_no", "report_nm", "rcept_dt", "corp_name", "parsed")
+        return dict(zip(keys, row, strict=True))
+
+    def chunk_rows(self, rcept_no: str):
+        return self.conn.execute(
+            "SELECT source_file, ord, section_path, body FROM chunks WHERE rcept_no = %s",
+            (rcept_no,),
+        ).fetchall()
+
+    def latest_filing_per_period(self, corp_code: str, report_kind: str) -> list[str]:
+        """기간별 마지막 접수본(정정 반영)의 접수번호, 오래된 기간부터."""
+        rows = self.conn.execute(
+            """
+            SELECT DISTINCT ON (period_key) rcept_no
+            FROM filings
+            WHERE corp_code = %s AND report_kind = %s AND parsed_at IS NOT NULL
+            ORDER BY period_key, rcept_dt DESC, rcept_no DESC
+            """,
+            (corp_code, report_kind),
+        ).fetchall()
+        return [r[0] for r in rows]

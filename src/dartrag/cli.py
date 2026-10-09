@@ -204,6 +204,43 @@ def ask(
     typer.echo("\n※ 공시 정보 요약이며 투자 권유가 아닙니다.")
 
 
+@app.command()
+def diff(
+    stock: Annotated[str | None, typer.Option("--stock", "-s", help="종목코드")] = None,
+    old: Annotated[str | None, typer.Option(help="이전 공시 접수번호")] = None,
+    new: Annotated[str | None, typer.Option(help="이후 공시 접수번호")] = None,
+    kind: str = "사업보고서",
+    out: Path | None = None,
+):
+    """두 보고서를 섹션별로 비교해 바뀐 내용 보기 (기본: 최근 두 사업보고서)."""
+    from dartrag.changes.compare import compare_filings, latest_pair
+
+    repo = Repository.connect(get_settings().database_url)
+    if not (old and new):
+        if not stock:
+            typer.echo("--stock 또는 --old/--new 를 지정하세요.", err=True)
+            raise typer.Exit(1)
+        corp_codes = repo.corp_codes_for_stocks([stock])
+        pair = latest_pair(repo, corp_codes[0], kind) if corp_codes else None
+        if pair is None:
+            typer.echo(
+                f"비교할 {kind}가 두 건 이상 없습니다. collect·parse 를 먼저 실행하세요.", err=True
+            )
+            raise typer.Exit(1)
+        old, new = pair
+    try:
+        result = compare_filings(repo, old, new)
+    except ValueError as e:
+        typer.echo(str(e), err=True)
+        raise typer.Exit(1) from None
+    text = result.markdown()
+    if out:
+        out.write_text(text, encoding="utf-8")
+        typer.echo(f"→ {out}")
+    else:
+        typer.echo(text)
+
+
 eval_app = typer.Typer(help="답변 품질 평가")
 app.add_typer(eval_app, name="eval")
 
