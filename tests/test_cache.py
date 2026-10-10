@@ -1,8 +1,15 @@
+import time
+
 import fakeredis
 from qdrant_client import QdrantClient
 
 from dartrag.answer import Answerer
-from dartrag.answer.cache import AnswerCache, normalize_question
+from dartrag.answer.cache import (
+    SEMANTIC_COLLECTION,
+    AnswerCache,
+    normalize_question,
+    prune_semantic,
+)
 from dartrag.answer.prompt import build_messages
 from dartrag.search import SearchFilter
 from tests.test_answer import HITS, FakeLLM, FakeRetriever
@@ -73,6 +80,26 @@ def test_stream_uses_cache():
     list(answerer.stream("DS 매출은?", SAMSUNG))
     events = list(answerer.stream("DS 매출은?", SAMSUNG))
     assert [k for k, _ in events] == ["sources", "token", "done"] and events[-1][1].cached
+
+
+def test_prune_semantic_drops_only_expired_question_vectors():
+    qdrant = QdrantClient(":memory:")
+    assert prune_semantic(qdrant, ttl=60) == 0  # 아직 컬렉션이 없음
+    llm = CountingLLM("DS 매출은 111조원입니다 [1].")
+    cache = AnswerCache(
+        fakeredis.FakeRedis(), llm.name, lambda: 1, ttl=60, qdrant=qdrant, embed=vec
+    )
+    answerer = Answerer(FakeRetriever(HITS), llm, cache=cache)
+    answerer.answer("삼성전자 2024년 DS 매출은?", SAMSUNG)
+    answerer.answer("삼성전자 2023년 DS 매출은?", SAMSUNG)  # 숫자가 달라 따로 저장
+    assert qdrant.count(SEMANTIC_COLLECTION).count == 2
+    assert prune_semantic(qdrant, ttl=60) == 0  # 기간 안의 것은 남긴다
+    assert prune_semantic(qdrant, ttl=60, now=time.time() + 61) == 2
+    assert qdrant.count(SEMANTIC_COLLECTION).count == 0
+    # 같은 질문은 그대로 Redis 에서 나오고, 새 질문은 다시 벡터로 저장된다
+    assert answerer.answer("삼성전자 2024년 DS 매출은?", SAMSUNG).cached
+    answerer.answer("삼성전자 2022년 DS 매출은?", SAMSUNG)
+    assert qdrant.count(SEMANTIC_COLLECTION).count == 1
 
 
 def test_broken_cache_does_not_break_answers():

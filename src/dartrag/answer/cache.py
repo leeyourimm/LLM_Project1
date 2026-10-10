@@ -67,6 +67,25 @@ def answer_from_dict(d: dict) -> Answer:
     )
 
 
+def prune_semantic(qdrant, ttl: int, now: float | None = None) -> int:
+    """보관 기간(ttl)이 지난 질문 벡터를 지우고 지운 개수를 돌려준다.
+
+    답 본문은 Redis 에서 ttl 뒤 저절로 사라지고 조회도 기간 안의 것만 보지만, Qdrant 의 질문
+    벡터는 지우지 않으면 질문 수만큼 계속 쌓여 메모리를 쓴다. 작업자가 매일 새벽 정리한다."""
+    from qdrant_client import models
+
+    if not qdrant.collection_exists(SEMANTIC_COLLECTION):
+        return 0
+    cutoff = (time.time() if now is None else now) - ttl
+    expired = models.Filter(
+        must=[models.FieldCondition(key="created", range=models.Range(lt=cutoff))]
+    )
+    n = qdrant.count(SEMANTIC_COLLECTION, count_filter=expired, exact=True).count
+    if n:
+        qdrant.delete(SEMANTIC_COLLECTION, points_selector=models.FilterSelector(filter=expired))
+    return n
+
+
 class AnswerCache:
     def __init__(
         self,

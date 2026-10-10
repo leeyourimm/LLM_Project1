@@ -1,9 +1,11 @@
 from contextlib import contextmanager
 from datetime import date, datetime
+from types import SimpleNamespace
 from zoneinfo import ZoneInfo
 
 import fakeredis
 import pytest
+from qdrant_client import QdrantClient
 
 from dartrag.config import Settings
 from dartrag.dart.client import QuotaExceeded
@@ -232,6 +234,7 @@ class JobRepo:
 
 def make_ctx(repo, redis=None):
     ctx = jobs.Context(Settings(_env_file=None, conversation_retention_days=30), redis)
+    ctx._backends = SimpleNamespace(qdrant=QdrantClient(":memory:"))
 
     @contextmanager
     def fake_repo():
@@ -264,7 +267,9 @@ def test_run_job_skips_when_locked():
         jobs.run_job(ctx, "maintenance", jobs.maintenance)
     assert r.get("dartrag:job:maintenance") == b"other-worker"  # 남의 잠금은 그대로
     r.delete("dartrag:job:maintenance")
-    assert jobs.run_job(ctx, "maintenance", jobs.maintenance)["sessions"] == 1
+    result = jobs.run_job(ctx, "maintenance", jobs.maintenance)
+    assert result["sessions"] == 1
+    assert result["answer_cache_vectors"] == 0  # Redis 가 있으면 답변 캐시의 질문 벡터도 정리
     assert r.get("dartrag:job:maintenance") is None  # 끝나면 푼다
     # 잠금 이름을 따로 주면 같은 작업이라도 대상이 다르면 함께 돈다
     r.set("dartrag:job:process:a", "x", ex=60)

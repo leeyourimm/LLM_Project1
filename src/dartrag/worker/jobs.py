@@ -266,14 +266,20 @@ def validate(ctx: Context, repo):
 
 
 def maintenance(ctx: Context, repo):
-    """보관 기간이 지난 대화, 만료된 세션, 오래된 발송·실행 기록 정리."""
+    """보관 기간이 지난 대화, 만료된 세션, 오래된 발송·실행 기록, 답변 캐시의 질문 벡터 정리."""
     s = ctx.settings
-    return {
+    out = {
         "conversations": repo.purge_conversations(s.conversation_retention_days),
         "sessions": repo.purge_expired_sessions(),
         "user_notifications": repo.purge_user_notifications(90),
         "job_runs": repo.purge_job_runs(90),
     }
+    # 답변 캐시는 Redis 가 있을 때만 쓴다 (factory.build_answerer)
+    if s.answer_cache and s.semantic_cache and ctx.redis is not None:
+        from dartrag.answer.cache import prune_semantic
+
+        out["answer_cache_vectors"] = prune_semantic(ctx.backends.qdrant, s.answer_cache_ttl)
+    return out
 
 
 def evaluate(ctx: Context, repo, limit: int | None = None, eval_dir: str = "eval"):
