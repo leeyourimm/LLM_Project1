@@ -402,6 +402,33 @@ def make_old_style_collection(settings) -> None:
     )
 
 
+def check_upgrade_runs_once(settings) -> None:
+    """이미 바뀐 컬렉션이면 ensure() 가 설정을 다시 바꾸지 않아야 한다.
+
+    작업자는 작업마다 새 프로세스로 ensure() 를 부르므로, 실제 Qdrant 가 돌려준 설정을 우리 설정과
+    다르다고 잘못 보면 매번 update_collection 을 불러 세그먼트를 계속 다시 만든다."""
+    from qdrant_client import QdrantClient
+
+    from dartrag.search.vector import COLLECTION, VectorIndex
+
+    client = QdrantClient(url=settings.qdrant_url, timeout=30)
+    calls: list = []
+    update = client.update_collection
+
+    def counting_update(*args, **kwargs):
+        calls.append(args)
+        return update(*args, **kwargs)
+
+    client.update_collection = counting_update
+    dim = client.get_collection(COLLECTION).config.params.vectors.size
+    VectorIndex(client).ensure(dim)
+    check(
+        not calls,
+        f"이미 바뀐 컬렉션인데 ensure() 가 update_collection 을 {len(calls)}번 불렀습니다",
+    )
+    print("Qdrant: 이미 바뀐 컬렉션은 ensure() 가 건드리지 않음", flush=True)
+
+
 def has_indexed_filings(settings) -> bool:
     from dartrag.db import Repository
 
@@ -474,6 +501,7 @@ def main() -> int:
         make_old_style_collection(settings)
         run_cli("index")
         check_vector_storage(settings)
+        check_upgrade_runs_once(settings)
 
         step("질문 (실제 검색·리랭커·LLM)")
         events, elapsed = ask_stream(QUESTION, FIRST_ANSWER)
