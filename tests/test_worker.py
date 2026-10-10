@@ -5,7 +5,7 @@ from zoneinfo import ZoneInfo
 import fakeredis
 import pytest
 
-from dartrag.config import Settings
+from dartrag.config import DEFAULT_STOCKS, Settings
 from dartrag.dart.client import QuotaExceeded
 from dartrag.dart.quota import DailyQuota, SharedThrottle
 from dartrag.pipeline.backfill import backfill_step
@@ -106,8 +106,10 @@ class IngestRepo:
     def __init__(self, rows):
         self.rows = rows
         self.done, self.failed, self.filings = [], [], []
+        self.focus = "unset"
 
-    def periodic_to_ingest(self, limit):
+    def periodic_to_ingest(self, limit, focus=None):
+        self.focus = focus
         return self.rows[:limit]
 
     def fiscal_end_month(self, code):
@@ -150,13 +152,30 @@ def test_ingest_stops_on_quota_without_counting_failure():
     assert s.stopped == "quota" and repo.done == ["20260310000001"] and repo.failed == []
 
 
+def test_ingest_job_follows_index_scope():
+    # INDEX_SCOPE=all(기본)은 모든 상장사, focus 는 기본 15개사(+ dartrag scope add 로 더한 회사)
+    assert Settings(_env_file=None).index_focus is None
+    for scope, focus in (("all", None), ("focus", DEFAULT_STOCKS)):
+        repo = IngestRepo([])
+        ctx = jobs.Context(Settings(_env_file=None, index_scope=scope))
+
+        @contextmanager
+        def dart():
+            yield Client([])
+
+        ctx.dart, ctx.store = dart, Store
+        jobs.ingest(ctx, repo)
+        assert repo.focus == focus
+
+
 class BackfillRepo(IngestRepo):
     def __init__(self, plan):
         super().__init__([])
         self.plan = plan
         self.finished, self.errored = [], []
 
-    def next_backfill(self, limit):
+    def next_backfill(self, limit, focus=None):
+        self.focus = focus
         return self.plan[:limit]
 
     def finish_backfill(self, code, filings):
@@ -190,6 +209,8 @@ def test_backfill_step_respects_reserve_and_errors():
     repo = BackfillRepo(plan[:1])
     s = backfill_step(Broken([]), repo, Store())
     assert repo.errored == ["00126380"] and "boom" in s.errors[0]
+    backfill_step(Client([]), repo, Store(), focus=DEFAULT_STOCKS)
+    assert repo.focus == DEFAULT_STOCKS
 
 
 # --- 작업 실행 기록과 잠금 --------------------------------------------------------

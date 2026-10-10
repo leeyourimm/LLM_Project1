@@ -23,7 +23,7 @@ def repo():
         "auth_tokens, user_devices, login_challenges, user_recovery_codes, user_totp, "
         "feedback, messages, conversations, sessions, user_watchlist, "
         "users, notifications, watchlist, disclosures, chunks, financial_items, filings, "
-        "companies, app_state CASCADE"
+        "companies, app_state, index_scope CASCADE"
     )
     conn.commit()
     r = Repository(conn)
@@ -541,6 +541,66 @@ def test_ingest_queue_and_alert_hold(repo):
     repo.mark_ingested("20260310000001")
     assert repo.ingest_backlog()["pending"] == 0
     assert len(repo.pending_alerts("webhook")) == 2
+
+
+def test_index_scope_limits_auto_ingest(repo):
+    from datetime import UTC, datetime, timedelta
+
+    from dartrag.config import DEFAULT_STOCKS
+
+    repo.upsert_companies(
+        [
+            Corp(corp_code="00126380", corp_name="삼성전자", stock_code="005930"),  # 기본 15개사
+            Corp(corp_code="00401731", corp_name="LG전자", stock_code="066570"),
+        ]
+    )
+    # 회원·체험 계정의 관심 종목은 색인 대상을 넓히지 않는다 (운영자가 dartrag scope add 로 더함)
+    member = repo.create_user("a@b.co", "x")
+    guest = repo.create_guest(datetime.now(UTC) + timedelta(hours=1))
+    for uid in (member, guest):
+        repo.set_watch("00401731", 2, uid)
+    repo.set_watch("00401731", 2)  # 운영자 알림
+    repo.set_watch("00126380", 2)
+    repo.start_alert_channel(member, "telegram", None, "t" * 64, datetime.now(UTC) + timedelta(1))
+    repo.confirm_alert_channel("telegram", "t" * 64, target="42")
+    repo.insert_disclosures(
+        [feed_row("20260310000001", corp="00401731"), feed_row("20260310000002")]
+    )
+
+    def queued(focus):
+        return [d["rcept_no"] for d in repo.periodic_to_ingest(focus=focus)]
+
+    assert queued(None) == ["20260310000001", "20260310000002"]  # INDEX_SCOPE=all
+    assert queued(DEFAULT_STOCKS) == ["20260310000002"]
+    # 대상 밖의 보고서는 대기 수(운영 경보)에 넣지 않고, 실패로 남기지도 않는다
+    assert repo.ingest_backlog(DEFAULT_STOCKS)["pending"] == 1
+    assert repo.ingest_backlog()["pending"] == 2
+    assert repo.ops_snapshot(DEFAULT_STOCKS)["ingest_backlog"] == 1
+    # 알림은 모든 상장사 그대로. 처리하지 않을 보고서는 변경점 요약을 기다리지 않고 바로 보낸다
+    assert repo.pending_alerts("webhook") == [] and repo.user_pending_alerts() == []
+    alerts = repo.pending_alerts("webhook", focus=DEFAULT_STOCKS)
+    assert [a["rcept_no"] for a in alerts] == ["20260310000001"]
+    alerts = repo.user_pending_alerts(focus=DEFAULT_STOCKS)
+    assert [(a["user_id"], a["rcept_no"]) for a in alerts] == [(member, "20260310000001")]
+
+    assert repo.add_index_scope("066570") and not repo.add_index_scope("066570")
+    assert [(s, n) for s, n, _ in repo.index_scope()] == [("066570", "LG전자")]
+    # 나중에 대상에 넣으면 아직 처리하지 않은 예전 보고서도 그대로 처리된다
+    assert queued(DEFAULT_STOCKS) == ["20260310000001", "20260310000002"]
+    assert repo.periodic_to_ingest(focus=DEFAULT_STOCKS)[0]["ingest_attempts"] == 0
+    assert repo.ingest_backlog(DEFAULT_STOCKS)["pending"] == 2
+    assert repo.pending_alerts("webhook", focus=DEFAULT_STOCKS) == []
+
+    assert repo.remove_index_scope("066570") and not repo.remove_index_scope("066570")
+    assert queued(DEFAULT_STOCKS) == ["20260310000002"]
+    # 회사 목록을 아직 받지 않은 종목코드도 넣어 둘 수 있다
+    assert repo.add_index_scope("999999")
+    assert [(s, n) for s, n, _ in repo.index_scope()] == [("999999", None)]
+
+    # 과거 데이터 채우기도 같은 범위만
+    repo.plan_backfill(2015, 2026)
+    assert [c for c, _, _ in repo.next_backfill(10)] == ["00126380", "00401731"]
+    assert repo.next_backfill(10, focus=DEFAULT_STOCKS) == [("00126380", 2015, 2026)]
 
 
 def test_backfill_jobs_and_issues(repo):

@@ -130,7 +130,7 @@ def ingest(ctx: Context, repo, limit: int = 20):
     from dartrag.pipeline.ingest import ingest_pending
 
     with ctx.dart() as client:
-        s = ingest_pending(client, repo, ctx.store(), limit=limit)
+        s = ingest_pending(client, repo, ctx.store(), limit=limit, focus=ctx.settings.index_focus)
     return {
         "filings": s.filings,
         "corp_codes": s.corp_codes,
@@ -223,16 +223,21 @@ def send_alerts(ctx: Context, repo):
     s = ctx.settings
     sent, errors = 0, []
     for notifier in build_notifiers(s, log.info):
-        n, errs = send_operator(repo, notifier)
+        n, errs = send_operator(repo, notifier, s.index_focus)
         sent, errors = sent + n, errors + errs
     run = send_user_alerts(
-        repo, build_senders(s), unsubscribe_url=unsubscribe_link(s.public_url, s.secret_key)
+        repo,
+        build_senders(s),
+        unsubscribe_url=unsubscribe_link(s.public_url, s.secret_key),
+        focus=s.index_focus,
     )
     return {"operator": sent, "users": run.sent, "items": run.items, "errors": errors + run.errors}
 
 
 def backfill(ctx: Context, repo):
-    """전체 상장사 과거 데이터를 하루 호출 한도 안에서 조금씩 채운다."""
+    """전체 상장사 과거 데이터를 하루 호출 한도 안에서 조금씩 채운다.
+
+    INDEX_SCOPE=focus 이면 자동 색인 대상 회사만 채운다 (나머지는 대기로 남는다)."""
     from dartrag.pipeline.backfill import backfill_step
     from dartrag.pipeline.collect import sync_companies
 
@@ -249,6 +254,7 @@ def backfill(ctx: Context, repo):
             max_companies=s.backfill_batch,
             quota=ctx.quota(),
             reserve=s.dart_reserve,
+            focus=s.index_focus,
         )
     return {
         "companies": len(result.companies),

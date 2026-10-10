@@ -5,6 +5,26 @@ from typing import Literal
 
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+# 기본 수집·색인 대상: KOSPI 대형주 15개사. dartrag collect 의 기본 대상이고,
+# INDEX_SCOPE=focus 일 때는 이 회사들과 운영자가 dartrag scope add 로 더한 회사만 자동 색인한다
+DEFAULT_STOCKS = (
+    "005930",  # 삼성전자
+    "000660",  # SK하이닉스
+    "373220",  # LG에너지솔루션
+    "207940",  # 삼성바이오로직스
+    "005380",  # 현대차
+    "000270",  # 기아
+    "068270",  # 셀트리온
+    "005490",  # POSCO홀딩스
+    "035420",  # NAVER
+    "051910",  # LG화학
+    "006400",  # 삼성SDI
+    "105560",  # KB금융
+    "055550",  # 신한지주
+    "035720",  # 카카오
+    "012330",  # 현대모비스
+)
+
 # 채팅 첫 화면의 예시 질문 (기본 수집 대상 15개사 안의 회사). 작업자가 답을 답변 캐시에 미리
 # 넣어 두어 CPU 서버에서도 누르면 바로 답한다 (dartrag cache warm).
 # .env 의 EXAMPLE_QUESTIONS 로 바꾼다
@@ -121,6 +141,10 @@ class Settings(BaseSettings):
     alerts_minutes: int = 5
     # 관심 종목 회사의 대시보드를 미리 만드는 주기 (바뀐 회사만 다시 만든다)
     dashboard_warm_minutes: int = 15
+    # 새 정기보고서를 자동으로 받아 원문·청크·검색 색인까지 만드는 회사 범위.
+    # all: 모든 상장사. focus: 기본 15개사(DEFAULT_STOCKS)와 dartrag scope add 로 더한 회사만.
+    # 공시 피드와 알림은 작은 목록이라 어느 쪽이든 모든 상장사를 받는다
+    index_scope: Literal["all", "focus"] = "all"
     backfill_enabled: bool = False  # 전체 상장사 과거 데이터 채우기 (며칠 걸림)
     backfill_start_year: int = 2015
     backfill_batch: int = 20  # 한 번에 처리할 회사 수
@@ -159,6 +183,13 @@ class Settings(BaseSettings):
     langfuse_sample_rate: float = 1.0
     # 탈퇴할 때 그 사용자의 Langfuse 추적 삭제를 요청 (실패해도 탈퇴는 그대로 끝남)
     langfuse_delete_on_account_delete: bool = True
+
+    @property
+    def index_focus(self) -> tuple[str, ...] | None:
+        """자동 색인의 기본 대상 종목코드. None 이면 모든 상장사 (INDEX_SCOPE=all).
+
+        focus 일 때는 여기에 더해 dartrag scope add 로 DB(index_scope)에 넣은 회사도 대상이다."""
+        return None if self.index_scope == "all" else DEFAULT_STOCKS
 
     @property
     def examples(self) -> tuple[str, ...]:
