@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { signupHref, timeLeft } from "@/lib/guest";
 import { useApp } from "./providers";
 import { Loading } from "./ui";
@@ -52,6 +52,84 @@ function ThemeToggle() {
   );
 }
 
+// 주요 화면 메뉴. 휴대폰처럼 좁은 화면에서는 한 줄로 두고 옆으로 밀어서 보는데, 넘친 쪽 끝을 흐리게 하고
+// ‹ › 표시를 붙여 더 있다는 것을 보여 주고, 지금 화면의 메뉴는 가운데로 끌어온다. 다 보이는 넓은 화면은 그대로 둔다
+function MainNav({ pathname }: { pathname: string }) {
+  const ref = useRef<HTMLElement>(null);
+  const [edge, setEdge] = useState({ left: false, right: false });
+
+  useEffect(() => {
+    const el = ref.current;
+    if (!el) return;
+    const update = () => {
+      const left = el.scrollLeft > 1;
+      const right = el.scrollLeft + el.clientWidth < el.scrollWidth - 1;
+      setEdge((e) => (e.left === left && e.right === right ? e : { left, right }));
+    };
+    const center = () => {
+      const current = el.querySelector<HTMLElement>('[aria-current="page"]');
+      if (current) {
+        const box = el.getBoundingClientRect();
+        const item = current.getBoundingClientRect();
+        el.scrollLeft += item.left - box.left - (box.width - item.width) / 2;
+      }
+      update();
+    };
+    center();
+    el.addEventListener("scroll", update, { passive: true });
+    // 화면 폭이 바뀌거나, 계정 단추나 글꼴이 늦게 와서 메뉴 폭이 바뀌면 다시 맞춘다
+    const ro = new ResizeObserver(center);
+    ro.observe(el);
+    for (const item of el.children) ro.observe(item);
+    return () => {
+      el.removeEventListener("scroll", update);
+      ro.disconnect();
+    };
+  }, [pathname]);
+
+  const active = (href: string) => (href === "/" ? pathname === "/" : pathname.startsWith(href));
+  const fade =
+    edge.left || edge.right
+      ? `linear-gradient(to right, ${edge.left ? "transparent, #000 2rem" : "#000"}, ${edge.right ? "#000 calc(100% - 2rem), transparent" : "#000"})`
+      : undefined;
+
+  const cue = "pointer-events-none absolute inset-y-0 flex items-center text-lg leading-none text-muted";
+
+  return (
+    <div className="relative order-last -mx-1 w-full min-w-0 sm:order-none sm:w-auto sm:flex-1">
+      <nav
+        ref={ref}
+        aria-label="주요 화면"
+        className="flex gap-1 overflow-x-auto"
+        style={fade ? { maskImage: fade, WebkitMaskImage: fade } : undefined}
+      >
+        {NAV.map((n) => (
+          <Link
+            key={n.href}
+            href={n.href}
+            aria-current={active(n.href) ? "page" : undefined}
+            className={`shrink-0 rounded-lg px-3 py-1.5 text-sm ${
+              active(n.href) ? "bg-accent-soft font-semibold text-accent" : "text-muted hover:text-ink"
+            }`}
+          >
+            {n.label}
+          </Link>
+        ))}
+      </nav>
+      {edge.left ? (
+        <span aria-hidden className={`${cue} left-0`}>
+          ‹
+        </span>
+      ) : null}
+      {edge.right ? (
+        <span aria-hidden className={`${cue} right-0`}>
+          ›
+        </span>
+      ) : null}
+    </div>
+  );
+}
+
 // 가입 이메일 인증 전(EMAIL_VERIFICATION_REQUIRED=true)일 때 모든 화면 위에 보이는 안내
 function VerifyBanner() {
   return (
@@ -93,8 +171,6 @@ export function AppShell({ children }: { children: React.ReactNode }) {
     if (needLogin) router.replace(`/login?next=${encodeURIComponent(pathname)}`);
   }, [needLogin, pathname, router]);
 
-  const active = (href: string) => (href === "/" ? pathname === "/" : pathname.startsWith(href));
-
   return (
     <div className="flex min-h-dvh flex-col">
       <header className="sticky top-0 z-20 border-b border-line bg-surface/95 backdrop-blur">
@@ -103,20 +179,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
             DART 공시 분석
           </Link>
           {!isPublic && !needLogin ? (
-            <nav aria-label="주요 화면" className="order-last -mx-1 flex w-full gap-1 overflow-x-auto sm:order-none sm:w-auto sm:flex-1">
-              {NAV.map((n) => (
-                <Link
-                  key={n.href}
-                  href={n.href}
-                  aria-current={active(n.href) ? "page" : undefined}
-                  className={`shrink-0 rounded-lg px-3 py-1.5 text-sm ${
-                    active(n.href) ? "bg-accent-soft font-semibold text-accent" : "text-muted hover:text-ink"
-                  }`}
-                >
-                  {n.label}
-                </Link>
-              ))}
-            </nav>
+            <MainNav pathname={pathname} />
           ) : (
             <div className="hidden flex-1 sm:block" />
           )}

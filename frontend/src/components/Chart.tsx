@@ -60,6 +60,15 @@ export function ticks(values: (number | null)[], count = 4): number[] {
   return out;
 }
 
+/** x축 라벨을 붙일 자리 (많아야 max 개). 마지막(최신) 점에서부터 같은 간격으로 거슬러 세어
+ *  라벨 사이가 늘 같고, 끝에서 두 라벨이 붙어 나오지 않는다 */
+export function labelIndexes(count: number, max: number): Set<number> {
+  const every = Math.max(1, Math.ceil(count / Math.max(max, 1)));
+  const out = new Set<number>();
+  for (let i = count - 1; i >= 0; i -= every) out.add(i);
+  return out;
+}
+
 function barPath(x: number, yBase: number, yEnd: number, w: number) {
   const h = Math.abs(yEnd - yBase);
   const r = Math.min(4, w / 2, h);
@@ -212,8 +221,9 @@ export function LineChart({ categories, series, format, axisFormat, height = 220
   const x = (i: number) => (categories.length > 1 ? M.left + step * i : M.left + innerW / 2);
   const tipRows = (ci: number) =>
     series.map((s, i) => ({ label: s.label, value: s.values[ci] === null ? "-" : format(s.values[ci] as number), i }));
-  // 라벨이 겹치지 않게 많으면 건너뛴다
-  const every = Math.ceil(categories.length / 8);
+  // 라벨이 겹치지 않게 많으면 건너뛴다. 좁은 화면에서는 라벨 폭(11px 글자 대략 7px + 여백)만큼 더 줄인다
+  const labelW = Math.max(0, ...categories.map((c) => c.length)) * 7 + 16;
+  const shown = labelIndexes(categories.length, Math.min(8, Math.floor(innerW / labelW)));
 
   return (
     <figure>
@@ -260,7 +270,7 @@ export function LineChart({ categories, series, format, axisFormat, height = 220
           </g>
           {categories.map((c, i) => (
             <g key={c}>
-              {i % every === 0 || i === categories.length - 1 ? (
+              {shown.has(i) ? (
                 <text
                   x={x(i)}
                   y={height - 8}

@@ -85,15 +85,19 @@ def _find_years(text: str) -> list[int]:
 
 
 def find_companies(text: str, companies: list[tuple[str, str]]) -> list[str]:
-    """질문에 나온 회사명 → corp_code. 긴 이름부터 찾아 '삼성전자우' 같은 겹침을 피한다."""
+    """질문에 나온 회사명 → corp_code (질문에 나온 순서).
+
+    긴 이름부터 찾아 '삼성전자우' 같은 겹침을 피한다. 찾은 자리는 같은 길이의 빈칸으로 지워
+    다른 이름의 위치가 밀리지 않게 하고, 결과는 그 위치 순으로 돌려준다
+    (비교 화면에서 고른 순서가 출처의 회사 순서와 같도록)."""
     norm = normalize_name(text)
     found = []
     for code, name in sorted(companies, key=lambda c: len(c[1]), reverse=True):
         key = normalize_name(name)
-        if len(key) >= 2 and key in norm:
-            norm = norm.replace(key, " ")
-            found.append(code)
-    return found
+        if len(key) >= 2 and (pos := norm.find(key)) >= 0:
+            norm = norm.replace(key, " " * len(key))
+            found.append((pos, code))
+    return [code for _, code in sorted(found)]
 
 
 def parse_question(

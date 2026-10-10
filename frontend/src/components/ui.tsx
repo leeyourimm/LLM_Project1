@@ -35,8 +35,9 @@ export function ImportanceBadge({ level }: { level: number }) {
         ? "bg-warning-soft text-warning"
         : "bg-surface-2 text-muted";
   const icon = imp.tone === "critical" ? "●" : imp.tone === "warning" ? "▲" : "○";
+  // 폭을 고정해야 "매우 중요"와 "중요"가 섞인 목록에서 옆 칸(날짜, 회사)이 줄마다 같은 자리에 온다
   return (
-    <span className={`inline-flex shrink-0 items-center gap-1 rounded-full px-2 py-0.5 text-xs font-semibold ${tone}`}>
+    <span className={`inline-flex w-22 shrink-0 items-center justify-center gap-1 rounded-full py-0.5 text-xs font-semibold whitespace-nowrap ${tone}`}>
       <span aria-hidden>{icon}</span>
       {imp.label}
     </span>
