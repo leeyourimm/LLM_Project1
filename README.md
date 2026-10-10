@@ -170,7 +170,7 @@ dartrag cache warm
 ## 1단계에서 한 것
 - **원문 파서** (`parsing/document.py`): DART XML의 섹션 경로, 표(병합 셀 펼침), 단위, 표 제목 추출. 깨진 XML도 복구해서 읽음
 - **청킹** (`parsing/chunking.py`): 섹션 경계를 넘지 않게 묶고, 긴 표는 머리글을 반복해 나눔. 청크마다 "회사 / 보고서 / 섹션" 맥락 문장을 붙임
-- **하이브리드 검색** (`search/`): Qdrant 벡터 검색(bge-m3)과 OpenSearch 키워드 검색(nori 형태소 분석)을 RRF로 합침. 회사·연도·보고서 종류 필터
+- **하이브리드 검색** (`search/`): Qdrant 벡터 검색(bge-m3)과 OpenSearch 키워드 검색(nori 형태소 분석)을 RRF로 합침. 회사·연도·보고서 종류 필터. Qdrant는 원본 벡터를 디스크에, 1/4 크기(int8) 사본만 메모리에 두고 후보를 원본 벡터로 다시 매김
 - **출처 답변** (`answer/`): 검색한 발췌에 번호를 붙여 로컬 LLM(Ollama)에 넘기고, 문장마다 출처 번호를 달게 함. 없는 번호를 인용하거나 출처 표시가 없으면 경고. 근거가 없으면 지어내지 않고 "찾지 못했습니다"로 답함
 - **색인 파이프라인** (`pipeline/index.py`): 새로 파싱됐거나 임베딩 모델이 바뀐 공시만 다시 색인
 
@@ -232,6 +232,7 @@ dartrag cache warm
 - **백그라운드 작업자** (`worker/`, Celery와 Redis):
   - 공시 피드를 10분마다 받고, 새 정기보고서는 5분마다 원문·재무 수집 → 파싱 → 색인 → 변경점 요약 → 데이터 검증 → 알림까지 이어서 처리합니다. 공시 후 30분 안에 검색과 알림에 반영하는 것이 목표입니다.
   - 정기보고서 알림은 변경점 요약을 붙이려고 처리가 끝날 때까지(최대 2시간) 기다립니다.
+  - `INDEX_SCOPE=focus`면 새 정기보고서 색인을 기본 15개사와 `dartrag scope add 066570`처럼 더한 회사로 줄입니다. 공시 피드와 알림은 그대로 모든 상장사를 받습니다 (작은 서버용, [docs/deploy-oracle.md](docs/deploy-oracle.md)).
   - `BACKFILL_ENABLED=true`면 전체 상장사의 2015년 이후 정기보고서를 채웁니다. OpenDART 하루 한도(키당 20,000회)를 여러 작업자가 Redis로 함께 세고, 새 공시 처리 몫(`DART_RESERVE`)은 남겨 둡니다. 회사 단위로 진행 상황을 저장해 재시작해도 이어서 합니다.
   - 새벽에 재무 데이터 검증과 보관 기간 정리(대화 180일, 만료 세션, 오래된 기록)를 합니다. 기한이 지난 체험 계정은 30분마다 지우고, 예시 질문 답은 새 공시 처리 뒤와 30분마다 다시 채웁니다.
   - 실행: 터미널 두 개에서 `celery -A dartrag.worker.celery_app worker -Q dart,process,default -c 2`와 `celery -A dartrag.worker.celery_app beat`. 상태는 `dartrag jobs status`, 작업 하나만 바로 돌리려면 `dartrag jobs run ingest`.
