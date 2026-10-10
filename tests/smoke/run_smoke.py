@@ -7,7 +7,8 @@ Ollama 를 실제로 띄워 두고 다음을 확인한다.
 
   1. 빈 DB 에 질문하면 "아직 수집·색인한 공시가 없어" 안내가 곧바로 온다
   2. 원문(tests/fixtures/sample_report.xml)을 원문 저장소에 넣고, dartrag parse·index 를
-     실제 프로세스로 실행한다 (OpenDART 는 부르지 않는다)
+     실제 프로세스로 실행한다 (OpenDART 는 부르지 않는다). Qdrant 컬렉션이 원본 벡터는 디스크에,
+     int8 사본은 메모리에 두는지 보고, 예전 방식 컬렉션도 dartrag index 가 바꾸는지 본다
   3. dartrag serve 의 /api/ask/stream 이 meta → sources → token… → done(출처 1개 이상) 순서로 답한다
   4. 같은 질문을 다시 하면 Redis 답변 캐시에서 나온다
 
@@ -357,6 +358,50 @@ def seed(settings) -> None:
     print(f"{CORP_NAME} {REPORT_NM} ({RCEPT_NO}) 원문을 {key} 에 넣었습니다", flush=True)
 
 
+# --- Qdrant 저장 방식 ----------------------------------------------------------
+
+
+def vector_storage(settings) -> tuple[str | None, dict | None]:
+    """(원본 벡터의 memory, 양자화 설정). REST 로 직접 읽어 클라이언트 모델 변환 없이 본다."""
+    from dartrag.search.vector import COLLECTION
+
+    r = httpx.get(f"{settings.qdrant_url}/collections/{COLLECTION}", timeout=10)
+    check(r.status_code == 200, f"Qdrant 컬렉션 {COLLECTION} 을 읽지 못했습니다: {r.text[:300]}")
+    config = r.json()["result"]["config"]
+    return config["params"]["vectors"].get("memory"), config.get("quantization_config")
+
+
+def check_vector_storage(settings) -> None:
+    """원본 벡터는 디스크(cold), int8 로 줄인 사본은 메모리 고정(pinned)."""
+    memory, quantization = vector_storage(settings)
+    scalar = (quantization or {}).get("scalar") or {}
+    check(memory == "cold", f"원본 벡터가 디스크(cold)에 있지 않습니다: memory={memory}")
+    check(
+        scalar.get("type") == "int8" and scalar.get("memory") == "pinned",
+        f"int8 사본이 메모리에 고정되어 있지 않습니다: {quantization}",
+    )
+    print(f"Qdrant: 원본 벡터 {memory}, 사본 {scalar}", flush=True)
+
+
+def make_old_style_collection(settings) -> None:
+    """이 방식을 쓰기 전에 만든 컬렉션(원본 벡터를 메모리에, 양자화 없음)처럼 되돌린다."""
+    from qdrant_client import QdrantClient, models
+
+    from dartrag.search.vector import COLLECTION
+
+    client = QdrantClient(url=settings.qdrant_url, timeout=30)
+    client.update_collection(
+        COLLECTION,
+        vectors_config={"": models.VectorParamsDiff(memory=models.Memory.CACHED)},
+        quantization_config=models.Disabled.DISABLED,
+    )
+    memory, quantization = vector_storage(settings)
+    check(
+        memory == "cached" and quantization is None,
+        f"되돌리지 못했습니다: {memory}, {quantization}",
+    )
+
+
 def has_indexed_filings(settings) -> bool:
     from dartrag.db import Repository
 
@@ -422,6 +467,13 @@ def main() -> int:
         timings["dartrag index"] = time.monotonic() - t0
         check("공시 1건" in out, f"색인한 공시가 1건이 아닙니다: {out.strip()}")
         check(has_indexed_filings(settings), "index 뒤에도 색인한 공시가 없습니다")
+        check_vector_storage(settings)
+
+        # 맥에서 먼저 만든 컬렉션처럼 예전 방식이어도, 다음 색인 때 그 자리에서 바뀌어야 한다
+        step("예전 방식 Qdrant 컬렉션 → dartrag index 가 그 자리에서 바꾸기")
+        make_old_style_collection(settings)
+        run_cli("index")
+        check_vector_storage(settings)
 
         step("질문 (실제 검색·리랭커·LLM)")
         events, elapsed = ask_stream(QUESTION, FIRST_ANSWER)
