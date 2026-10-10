@@ -275,7 +275,7 @@ class AlertRepo:
         self.notified = []
         self.results = []
 
-    def user_pending_alerts(self):
+    def user_pending_alerts(self, focus=None):
         return [row(1), row(2)]
 
     def latest_diff_summary_for(self, rcept_no):

@@ -48,8 +48,11 @@ packages = ["src/dartrag"]
 [tool.pytest.ini_options]
 pythonpath = ["src"]
 testpaths = ["tests"]
-# 테스트용 로컬(:memory:) Qdrant 는 페이로드 인덱스를 무시한다는 경고
-filterwarnings = ["ignore:Payload indexes have no effect"]
+# 테스트용 로컬(:memory:) Qdrant 는 페이로드 인덱스와 검색 설정(양자화 rescore)을 무시한다는 경고
+filterwarnings = [
+  "ignore:Payload indexes have no effect",
+  "ignore:Local mode performs exact",
+]
 
 [tool.ruff]
 line-length = 100

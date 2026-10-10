@@ -1,4 +1,4 @@
-from collections.abc import Iterable, Iterator
+from collections.abc import Iterable, Iterator, Sequence
 from contextlib import contextmanager
 from pathlib import Path
 
@@ -19,6 +19,34 @@ def _schema_dir() -> Path:
 
 
 SCHEMA_DIR = _schema_dir()
+
+
+def _in_scope(focus: Sequence[str] | None) -> tuple[str, tuple]:
+    """자동 색인 대상만 남기는 조건 (companies 를 c 로 조인한 쿼리에 붙인다).
+
+    focus 가 None 이면 모든 상장사 (INDEX_SCOPE=all, 조건 없음). 종목코드 목록이면
+    그 회사들과 운영자가 dartrag scope add 로 더한 회사(index_scope)만 (INDEX_SCOPE=focus)."""
+    if focus is None:
+        return "", ()
+    return (
+        "AND (c.stock_code = ANY(%s) OR c.stock_code IN (SELECT stock_code FROM index_scope))",
+        (list(focus),),
+    )
+
+
+def _held_for_ingest(focus: Sequence[str] | None) -> tuple[str, tuple]:
+    """정기보고서 알림을 처리(변경점 요약)가 끝날 때까지 최대 2시간 미루는 조건 (d = disclosures).
+
+    INDEX_SCOPE=focus 이면 자동 색인 대상 회사의 보고서만 미룬다. 나머지는 처리하지 않으므로
+    기다리지 않고 바로 보낸다."""
+    scope, params = _in_scope(focus)
+    if scope:
+        scope = f"AND EXISTS (SELECT 1 FROM companies c WHERE c.corp_code = d.corp_code {scope})"
+    return (
+        f"""(d.pblntf_ty = 'A' AND d.ingested_at IS NULL AND d.ingest_attempts < 5
+                 AND d.seen_at > now() - interval '2 hours' {scope})""",
+        params,
+    )
 
 
 class Repository:
@@ -1043,24 +1071,25 @@ class Repository:
         self.conn.execute("DELETE FROM login_challenges WHERE token_hash = %s", (token_hash,))
         self.conn.commit()
 
-    def pending_alerts(self, channel: str) -> list[dict]:
+    def pending_alerts(self, channel: str, focus: Sequence[str] | None = None) -> list[dict]:
         """관심 종목의 기준 이상 공시 중 이 채널로 아직 안 보낸 것.
 
-        정기보고서는 변경점 요약을 붙이려고 처리가 끝날 때까지(최대 2시간) 기다린다."""
+        정기보고서는 변경점 요약을 붙이려고 처리가 끝날 때까지(최대 2시간) 기다린다.
+        focus(INDEX_SCOPE=focus)이면 처리하지 않는 회사의 보고서는 기다리지 않는다."""
+        held, params = _held_for_ingest(focus)
         cur = self.conn.execute(
-            """
+            f"""
             SELECT d.rcept_no, d.corp_name, d.report_nm, d.rcept_dt, d.event_label,
                    d.importance, d.correction
             FROM disclosures d
             JOIN watchlist w ON w.corp_code = d.corp_code AND d.importance >= w.min_importance
             WHERE d.seen_at >= w.added_at
-              AND NOT (d.pblntf_ty = 'A' AND d.ingested_at IS NULL AND d.ingest_attempts < 5
-                       AND d.seen_at > now() - interval '2 hours')
+              AND NOT {held}
               AND NOT EXISTS (SELECT 1 FROM notifications n
                               WHERE n.rcept_no = d.rcept_no AND n.channel = %s)
             ORDER BY d.rcept_dt, d.rcept_no
             """,
-            (channel,),
+            (*params, channel),
         )
         cols = [c.name for c in cur.description]
         return [dict(zip(cols, r, strict=True)) for r in cur.fetchall()]
@@ -1418,12 +1447,16 @@ class Repository:
             self._drop_empty_push_channel(user_id)
         self.conn.commit()
 
-    def user_pending_alerts(self, max_age_days: int = 3) -> list[dict]:
+    def user_pending_alerts(
+        self, max_age_days: int = 3, focus: Sequence[str] | None = None
+    ) -> list[dict]:
         """인증된 채널이 있는 사용자의 관심 종목 공시 중 아직 안 보낸 것.
 
-        채널을 켠 직후 예전 공시가 한꺼번에 가지 않게 최근 며칠 것만 본다."""
+        채널을 켠 직후 예전 공시가 한꺼번에 가지 않게 최근 며칠 것만 본다.
+        focus 는 pending_alerts 와 같다."""
+        held, params = _held_for_ingest(focus)
         cur = self.conn.execute(
-            """
+            f"""
             SELECT ch.user_id, ch.kind, ch.target, d.rcept_no, d.corp_code, d.corp_name,
                    d.report_nm, d.rcept_dt, d.event_label, d.importance, d.correction
             FROM user_alert_channels ch
@@ -1437,14 +1470,13 @@ class Repository:
               AND d.seen_at >= w.added_at AND d.seen_at >= ch.verified_at - interval '1 day'
               AND d.seen_at >= now() - make_interval(days => %s)
               -- 정기보고서는 처리(변경점 요약)가 끝나면 보낸다. 2시간이 지나면 그냥 보낸다
-              AND NOT (d.pblntf_ty = 'A' AND d.ingested_at IS NULL AND d.ingest_attempts < 5
-                       AND d.seen_at > now() - interval '2 hours')
+              AND NOT {held}
               AND NOT EXISTS (SELECT 1 FROM user_notifications n
                               WHERE n.user_id = ch.user_id AND n.rcept_no = d.rcept_no
                                 AND n.channel = ch.kind)
             ORDER BY ch.user_id, ch.kind, d.importance DESC, d.rcept_dt, d.rcept_no
             """,
-            (max_age_days,),
+            (max_age_days, *params),
         )
         cols = [c.name for c in cur.description]
         return [dict(zip(cols, r, strict=True)) for r in cur.fetchall()]
@@ -1458,17 +1490,50 @@ class Repository:
             )
         self.conn.commit()
 
+    # --- 자동 색인 대상 (INDEX_SCOPE=focus) --------------------------------
+
+    def add_index_scope(self, stock_code: str) -> bool:
+        """운영자가 자동 색인 대상에 회사를 더한다. 새로 넣었으면 True."""
+        cur = self.conn.execute(
+            "INSERT INTO index_scope (stock_code) VALUES (%s) ON CONFLICT DO NOTHING",
+            (stock_code,),
+        )
+        self.conn.commit()
+        return cur.rowcount == 1
+
+    def remove_index_scope(self, stock_code: str) -> bool:
+        cur = self.conn.execute("DELETE FROM index_scope WHERE stock_code = %s", (stock_code,))
+        self.conn.commit()
+        return cur.rowcount == 1
+
+    def index_scope(self) -> list[tuple[str, str | None, object]]:
+        """운영자가 더한 회사 (종목코드, 회사 이름, 넣은 시각).
+
+        회사 목록(companies)에 아직 없는 종목코드면 이름은 None."""
+        return self.conn.execute(
+            """SELECT s.stock_code, c.corp_name, s.added_at
+               FROM index_scope s LEFT JOIN companies c ON c.stock_code = s.stock_code
+               ORDER BY s.added_at, s.stock_code"""
+        ).fetchall()
+
     # --- 새 정기보고서 처리 대기열 ---------------------------------------
 
-    def periodic_to_ingest(self, limit: int = 20, max_attempts: int = 5) -> list[dict]:
-        """피드로 받은 정기보고서 중 아직 처리하지 않은 것 (우리 DB 의 상장사만)."""
+    def periodic_to_ingest(
+        self, limit: int = 20, max_attempts: int = 5, focus: Sequence[str] | None = None
+    ) -> list[dict]:
+        """피드로 받은 정기보고서 중 아직 처리하지 않은 것 (우리 DB 의 상장사만).
+
+        focus(INDEX_SCOPE=focus 의 기본 종목코드)를 주면 그 회사와 운영자가 더한 회사의 것만
+        돌려준다. 나머지는 실패로 남기지 않고 그대로 두어, 나중에 대상에 넣으면 그때 처리된다."""
+        scope, params = _in_scope(focus)
         cur = self.conn.execute(
-            """SELECT d.rcept_no, d.corp_code, d.corp_name, d.report_nm, d.rcept_dt,
+            f"""SELECT d.rcept_no, d.corp_code, d.corp_name, d.report_nm, d.rcept_dt,
                       d.ingest_attempts
                FROM disclosures d JOIN companies c USING (corp_code)
                WHERE d.pblntf_ty = 'A' AND d.ingested_at IS NULL AND d.ingest_attempts < %s
+                 {scope}
                ORDER BY d.seen_at, d.rcept_no LIMIT %s""",
-            (max_attempts, limit),
+            (max_attempts, *params, limit),
         )
         cols = [c.name for c in cur.description]
         return [dict(zip(cols, r, strict=True)) for r in cur.fetchall()]
@@ -1489,12 +1554,17 @@ class Repository:
         )
         self.conn.commit()
 
-    def ingest_backlog(self) -> dict:
+    def ingest_backlog(self, focus: Sequence[str] | None = None) -> dict:
+        """처리 대기 정기보고서 수. focus 는 periodic_to_ingest 와 같다 (대상이 아닌 회사의 보고서는
+        처리하지 않으므로 세지 않는다. 세면 대기 수가 계속 늘어 운영 경보가 울린다)."""
+        scope, params = _in_scope(focus)
         row = self.conn.execute(
-            """SELECT count(*) FILTER (WHERE ingested_at IS NULL AND ingest_attempts < 5),
-                      count(*) FILTER (WHERE ingested_at IS NULL AND ingest_attempts >= 5),
-                      min(seen_at) FILTER (WHERE ingested_at IS NULL AND ingest_attempts < 5)
-               FROM disclosures JOIN companies USING (corp_code) WHERE pblntf_ty = 'A'"""
+            f"""SELECT count(*) FILTER (WHERE d.ingested_at IS NULL AND d.ingest_attempts < 5),
+                      count(*) FILTER (WHERE d.ingested_at IS NULL AND d.ingest_attempts >= 5),
+                      min(d.seen_at) FILTER (WHERE d.ingested_at IS NULL AND d.ingest_attempts < 5)
+               FROM disclosures d JOIN companies c USING (corp_code)
+               WHERE d.pblntf_ty = 'A' {scope}""",
+            params,
         ).fetchone()
         return {"pending": row[0], "failed": row[1], "oldest_pending": row[2]}
 
@@ -1518,12 +1588,17 @@ class Repository:
         self.conn.commit()
         return added
 
-    def next_backfill(self, limit: int, max_attempts: int = 3) -> list[tuple[str, int, int]]:
+    def next_backfill(
+        self, limit: int, max_attempts: int = 3, focus: Sequence[str] | None = None
+    ) -> list[tuple[str, int, int]]:
+        """다음에 채울 회사. focus 는 periodic_to_ingest 와 같다 (대상 밖의 회사는 대기로 둔다)."""
+        scope, params = _in_scope(focus)
         return self.conn.execute(
-            """SELECT corp_code, start_year, end_year FROM backfill_state
-               WHERE status = 'pending' OR (status = 'error' AND attempts < %s)
-               ORDER BY attempts, corp_code LIMIT %s""",
-            (max_attempts, limit),
+            f"""SELECT b.corp_code, b.start_year, b.end_year
+               FROM backfill_state b JOIN companies c USING (corp_code)
+               WHERE (b.status = 'pending' OR (b.status = 'error' AND b.attempts < %s)) {scope}
+               ORDER BY b.attempts, b.corp_code LIMIT %s""",
+            (max_attempts, *params, limit),
         ).fetchall()
 
     def finish_backfill(self, corp_code: str, filings: int) -> None:
@@ -1592,8 +1667,10 @@ class Repository:
 
     # --- 운영 지표 ---------------------------------------------------------
 
-    def ops_snapshot(self) -> dict:
-        """Prometheus 지표용 현재 상태 (작업, 처리 대기, 데이터 오류, 사용자, 최근 평가)."""
+    def ops_snapshot(self, focus: Sequence[str] | None = None) -> dict:
+        """Prometheus 지표용 현재 상태 (작업, 처리 대기, 데이터 오류, 사용자, 최근 평가).
+
+        focus: 자동 색인 대상 (ingest_backlog 참고)."""
         jobs = [
             {"name": name, "last_success": r["last_ok"], "status": r["last_status"]}
             for name, r in self.last_job_runs().items()
@@ -1610,7 +1687,7 @@ class Repository:
         ).fetchone()
         out = {
             "jobs": jobs,
-            "ingest_backlog": self.ingest_backlog()["pending"],
+            "ingest_backlog": self.ingest_backlog(focus)["pending"],
             "issues": {"error": issues.get("error", 0), "warn": issues.get("warn", 0)},
             "users": users,
             "guests": guests,

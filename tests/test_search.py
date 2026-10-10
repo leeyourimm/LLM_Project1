@@ -1,4 +1,5 @@
 import json
+from types import SimpleNamespace
 
 import httpx
 import pytest
@@ -85,6 +86,73 @@ def test_vector_delete_filing_and_dim_check(vector):
     with pytest.raises(ValueError, match="차원"):
         vector.ensure(1024)
     assert point_id("c1") == point_id("c1") != point_id("c2")
+
+
+class SpyQdrant:
+    """로컬(:memory:) Qdrant 는 저장 방식·양자화 설정을 저장하지 않아서, 요청만 기록하는 가짜."""
+
+    def __init__(self, vectors=None):
+        self.config = None
+        if vectors is not None:  # 예전 방식으로 이미 만든 컬렉션
+            self.create_collection("dart_chunks", vectors, None)
+        self.updates, self.searches = [], []
+
+    def collection_exists(self, name):
+        return self.config is not None
+
+    def get_collection(self, name):
+        return SimpleNamespace(config=self.config)
+
+    def create_collection(self, name, vectors_config, quantization_config):
+        self.config = SimpleNamespace(
+            params=SimpleNamespace(vectors=vectors_config), quantization_config=quantization_config
+        )
+
+    def create_payload_index(self, *args):
+        pass
+
+    def update_collection(self, name, vectors_config, quantization_config):
+        self.updates.append(name)
+        vectors = self.config.params.vectors
+        self.config.params.vectors = vectors.model_copy(
+            update={"memory": vectors_config[""].memory}
+        )
+        self.config.quantization_config = quantization_config
+
+    def query_points(self, name, **kwargs):
+        self.searches.append(kwargs)
+        return SimpleNamespace(points=[])
+
+
+def test_vector_collection_keeps_vectors_on_disk_and_int8_in_ram():
+    from qdrant_client import models
+
+    def check(spy):
+        cfg = spy.config
+        assert cfg.params.vectors.memory == models.Memory.COLD  # 원본 벡터는 디스크
+        scalar = cfg.quantization_config.scalar
+        assert scalar.type == models.ScalarType.INT8 and scalar.memory == models.Memory.PINNED
+
+    spy = SpyQdrant()
+    VectorIndex(spy).ensure(8)
+    check(spy)
+    VectorIndex(spy).ensure(8)
+    assert spy.updates == []  # 이미 지금 방식이면 바꾸지 않는다
+
+    # 예전 방식(원본 벡터를 메모리에, 양자화 없음)으로 만든 컬렉션은 처음 한 번만 바꾼다
+    old = models.VectorParams(size=8, distance=models.Distance.COSINE)
+    spy = SpyQdrant(old)
+    VectorIndex(spy).ensure(8)
+    VectorIndex(spy).ensure(8)
+    check(spy)
+    assert spy.updates == ["dart_chunks"]
+    with pytest.raises(ValueError, match="차원"):
+        VectorIndex(spy).ensure(1024)
+
+    # 검색은 int8 사본으로 후보를 넉넉히 고른 뒤 원본 벡터로 다시 매긴다
+    VectorIndex(spy).search([0.1] * 8, SearchFilter(), 5)
+    q = spy.searches[0]["search_params"].quantization
+    assert q.rescore is True and q.oversampling > 1
 
 
 class FakeKeyword:

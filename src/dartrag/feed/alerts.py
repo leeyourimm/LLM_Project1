@@ -140,11 +140,12 @@ def send_user_alerts(
     senders: dict[str, object],
     *,
     unsubscribe_url: Callable[[int, str], str | None] = lambda uid, kind: None,
+    focus=None,
 ) -> AlertRun:
     """senders: {"email": EmailSender, "telegram": TelegramSender, "push": WebPushSender}.
-    없는 채널은 건너뛴다."""
+    없는 채널은 건너뛴다. focus: 자동 색인 대상 (Repository.user_pending_alerts 참고)."""
     run = AlertRun()
-    rows = repo.user_pending_alerts()
+    rows = repo.user_pending_alerts(focus=focus)
     headlines: dict[str, list[str]] = {}
     for (user_id, kind, target), group in groupby(
         rows, key=lambda r: (r["user_id"], r["kind"], r["target"])

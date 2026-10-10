@@ -152,6 +152,8 @@ docker compose exec -d worker dartrag run --eval-limit 0
 
 진행 상황은 작업자 로그로 봅니다 (다음 절). 이후 새 공시는 작업자가 10분마다 자동으로 받습니다. 전체 상장사의 과거 데이터를 채우려면 `.env`에서 `BACKFILL_ENABLED=true`로 바꾸고 "설정 바꾸기"대로 다시 띄웁니다.
 
+새 정기보고서는 기본으로 모든 상장사의 것을 받아 색인합니다. 디스크와 메모리를 아끼려면 `.env`에 `INDEX_SCOPE=focus`를 넣습니다. 그러면 기본 15개사와 `dartrag scope add`로 더한 회사만 색인하고(과거 데이터 채우기도 같음), 공시 피드와 알림은 그대로 모든 상장사를 받습니다. 자세한 것은 [deploy-oracle.md](deploy-oracle.md)의 "데이터가 쌓여도 무료로 유지하기"를 봅니다.
+
 텔레그램 알림 봇을 쓴다면 `.env`에 `TELEGRAM_BOT_TOKEN`, `TELEGRAM_WEBHOOK_SECRET`을 넣고 아래로 웹훅을 등록합니다.
 
 ```bash

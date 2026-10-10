@@ -146,7 +146,7 @@ def rate_limits(settings: Settings) -> dict:
 
 def ops_snapshot(settings: Settings, repo, redis) -> dict:
     with repo() as r:
-        snap = r.ops_snapshot()
+        snap = r.ops_snapshot(settings.index_focus)
     snap["dart_daily_limit"] = settings.dart_daily_limit
     if redis is not None:
         from dartrag.dart.quota import DailyQuota

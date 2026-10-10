@@ -1,12 +1,12 @@
 import logging
 from datetime import date
 from pathlib import Path
-from typing import Annotated
+from typing import Annotated, NoReturn
 
 import typer
 
 from dartrag.bench import SLO_FIRST_TOKEN_S, SLO_TOTAL_P95_S
-from dartrag.config import get_settings
+from dartrag.config import DEFAULT_STOCKS, get_settings
 from dartrag.dart import DartApiError, DartHttpError, OpenDartClient
 from dartrag.db import Repository
 from dartrag.pipeline.collect import collect
@@ -15,25 +15,6 @@ from dartrag.search.types import SearchFilter
 from dartrag.storage import make_raw_store
 
 app = typer.Typer(help="DART 공시 분석 서비스 도구")
-
-# 0단계 기본 대상: KOSPI 대형주 15개사
-DEFAULT_STOCKS = [
-    "005930",  # 삼성전자
-    "000660",  # SK하이닉스
-    "373220",  # LG에너지솔루션
-    "207940",  # 삼성바이오로직스
-    "005380",  # 현대차
-    "000270",  # 기아
-    "068270",  # 셀트리온
-    "005490",  # POSCO홀딩스
-    "035420",  # NAVER
-    "051910",  # LG화학
-    "006400",  # 삼성SDI
-    "105560",  # KB금융
-    "055550",  # 신한지주
-    "035720",  # 카카오
-    "012330",  # 현대모비스
-]
 
 # 수집을 하나도 하지 못하고 멈췄을 때의 종료 코드. dartrag run 은 이때 나머지 단계를 건너뛴다
 COLLECT_STOPPED = 2
@@ -77,7 +58,7 @@ def collect_cmd(
                 client,
                 repo,
                 make_raw_store(settings),
-                stocks or DEFAULT_STOCKS,
+                stocks or list(DEFAULT_STOCKS),
                 start_year,
                 end_year,
                 download_documents=not no_documents,
@@ -338,12 +319,13 @@ def _send_all_alerts(repo, settings) -> tuple[int, list[str]]:
 
     sent, errors = 0, []
     for notifier in build_notifiers(settings, typer.echo):
-        n, errs = send_alerts(repo, notifier)
+        n, errs = send_alerts(repo, notifier, settings.index_focus)
         sent, errors = sent + n, errors + errs
     run = send_user_alerts(
         repo,
         build_senders(settings),
         unsubscribe_url=unsubscribe_link(settings.public_url, settings.secret_key),
+        focus=settings.index_focus,
     )
     return sent + run.sent, errors + run.errors
 
@@ -503,7 +485,7 @@ def jobs_status():
     ctx = jobs.Context.from_settings(settings)
     with ctx.repo() as repo:
         runs = repo.last_job_runs()
-        backlog = repo.ingest_backlog()
+        backlog = repo.ingest_backlog(settings.index_focus)
         progress = repo.backfill_progress()
     for name in JOB_NAMES:
         r = runs.get(name)
@@ -708,6 +690,151 @@ def watch_list():
         typer.echo("관심 종목이 없습니다. dartrag watch add 005930 처럼 추가하세요.")
     for _code, name, stock, imp in rows:
         typer.echo(f"{stock or '-'} {name} (중요도 {imp} 이상)")
+
+
+scope_app = typer.Typer(
+    help="자동 색인 대상 회사 (INDEX_SCOPE=focus 일 때 기본 15개사에 더하는 회사)"
+)
+app.add_typer(scope_app, name="scope")
+
+
+def _stock_code(stock: str) -> str:
+    stock = stock.strip().upper()
+    if len(stock) != 6 or not stock.isascii() or not stock.isalnum():
+        typer.echo(f"{stock}: 종목코드는 6자리입니다 (예: 066570).", err=True)
+        raise typer.Exit(1)
+    return stock
+
+
+def _scope_later(stock: str, reason: str) -> NoReturn:
+    """지금은 보고서를 받지 못했지만 회사는 색인 대상에 남긴다."""
+    typer.echo(reason, err=True)
+    typer.echo(
+        f"{stock} 은(는) 색인 대상에 남아 있어, 작업자가 이 회사의 새 정기보고서를 받으면 "
+        f"처리합니다. 지난 보고서도 받으려면 나중에 dartrag scope add {stock} 을 다시 실행하세요.",
+        err=True,
+    )
+    raise typer.Exit(1)
+
+
+@scope_app.command("add")
+def scope_add(stock: str):
+    """회사를 자동 색인 대상에 더하고, 최근 정기보고서를 바로 수집·파싱·색인.
+
+    기간은 dartrag collect 의 기본과 같다 (최근 3개 사업연도와 올해). 임베딩 모델을 불러오므로
+    서버에서는 질문에 답하는 api 컨테이너 안이 아니라 따로 띄운 컨테이너에서 실행한다
+    (docker compose run --rm api dartrag scope add 066570)."""
+    from dartrag.pipeline.index import index_filings
+
+    stock = _stock_code(stock)
+    logging.basicConfig(level=logging.INFO)
+    # httpx 요청 로그에는 인증키가 쿼리 문자열로 찍히므로 끈다
+    logging.getLogger("httpx").setLevel(logging.WARNING)
+    settings = get_settings()
+    repo = Repository.connect(settings.database_url)
+    repo.migrate()
+    if stock in DEFAULT_STOCKS:
+        typer.echo(f"{stock} 은(는) 기본 대상 15개사라 이미 색인합니다.")
+        return
+    added = repo.add_index_scope(stock)
+    typer.echo(f"{stock} 을(를) 색인 대상에 {'넣었습니다' if added else '이미 넣어 두었습니다'}.")
+    if settings.index_scope == "all":
+        typer.echo("참고: INDEX_SCOPE=all 이라 원래 모든 상장사의 새 정기보고서를 색인합니다.")
+    if not settings.dart_api_key:
+        _scope_later(stock, "DART_API_KEY 가 없어 지금은 보고서를 받지 못했습니다.")
+
+    start_year, end_year = year_range(None, None)
+    typer.echo(f"{start_year}~{end_year} 사업연도 정기보고서를 받아 색인합니다 (몇 분~수십 분).")
+    store = make_raw_store(settings)
+    try:
+        with OpenDartClient(
+            settings.dart_api_key, min_interval=settings.dart_min_interval
+        ) as client:
+            summary = collect(client, repo, store, [stock], start_year, end_year)
+    except DartApiError as e:
+        _scope_later(stock, f"OpenDART 오류로 지금은 보고서를 받지 못했습니다: {e}")
+    except DartHttpError as e:
+        _scope_later(stock, f"OpenDART 에 연결하지 못해 지금은 보고서를 받지 못했습니다: {e}")
+    company = repo.company_by_stock(stock)
+    if company is None:
+        # 상장사 목록을 방금 받았는데 없으면 잘못된 종목코드다
+        repo.remove_index_scope(stock)
+        typer.echo(f"{stock}: 상장사 목록에 없는 종목코드라 색인 대상에서 뺐습니다.", err=True)
+        raise typer.Exit(1)
+    for line in summary.errors:
+        typer.echo(f"오류: {line}", err=True)
+    if summary.errors and not summary.filings:
+        _scope_later(
+            stock, "OpenDART 에서 보고서를 받지 못했습니다 (오늘 호출 한도나 점검일 수 있음)."
+        )
+
+    corp_code, corp_name, _ = company
+    parsed = parse_filings(repo, store, [corp_code])
+    try:
+        embedder, vector, keyword = _search_backends(settings)
+        indexed = index_filings(repo, embedder, vector, keyword, [corp_code])
+    except Exception as e:  # noqa: BLE001 - 수집·파싱한 것은 작업자가 이어서 색인한다
+        typer.echo(
+            f"검색 색인을 만들지 못했습니다 ({type(e).__name__}: {e}). 받아 둔 보고서는 작업자가 "
+            "15분마다 밀린 색인을 처리할 때 함께 색인합니다.",
+            err=True,
+        )
+        raise typer.Exit(1) from None
+    typer.echo(
+        f"{corp_name}: 정기보고서 {summary.filings}건 수집, {parsed.filings}건 파싱"
+        f"(청크 {parsed.chunks}개), {indexed.filings}건 색인"
+    )
+    errors = summary.errors + parsed.errors + indexed.errors
+    for line in parsed.errors + indexed.errors:
+        typer.echo(f"오류: {line}", err=True)
+    raise typer.Exit(1 if errors else 0)
+
+
+@scope_app.command("remove")
+def scope_remove(stock: str):
+    """회사를 자동 색인 대상에서 빼기. 이미 색인한 보고서는 검색에 그대로 남는다."""
+    stock = _stock_code(stock)
+    if stock in DEFAULT_STOCKS:
+        typer.echo(f"{stock} 은(는) 기본 대상 15개사라 뺄 수 없습니다.", err=True)
+        raise typer.Exit(1)
+    settings = get_settings()
+    repo = Repository.connect(settings.database_url)
+    repo.migrate()
+    if not repo.remove_index_scope(stock):
+        typer.echo(f"{stock} 은(는) 색인 대상에 더한 회사가 아닙니다.")
+        return
+    typer.echo(
+        f"{stock} 을(를) 색인 대상에서 뺐습니다. 앞으로 나오는 정기보고서는 색인하지 않습니다 "
+        "(공시 피드와 알림은 그대로 받습니다)."
+    )
+    typer.echo("이미 색인한 보고서는 지우지 않아 검색과 답변에 그대로 남습니다.")
+    if settings.index_scope == "all":
+        typer.echo("참고: INDEX_SCOPE=all 이라 지금은 모든 상장사를 색인합니다.")
+
+
+@scope_app.command("list")
+def scope_list():
+    """자동 색인 대상: 기본 15개사와 dartrag scope add 로 더한 회사."""
+    settings = get_settings()
+    repo = Repository.connect(settings.database_url)
+    repo.migrate()
+    if settings.index_scope == "all":
+        typer.echo("INDEX_SCOPE=all: 모든 상장사의 새 정기보고서를 색인합니다.")
+        typer.echo("아래 목록은 INDEX_SCOPE=focus 로 바꾸면 쓰입니다.\n")
+    else:
+        typer.echo("INDEX_SCOPE=focus: 아래 회사의 새 정기보고서만 색인합니다.\n")
+    names = []
+    for stock in DEFAULT_STOCKS:
+        company = repo.company_by_stock(stock)
+        names.append(f"{company[1]}({stock})" if company else stock)
+    typer.echo(f"기본 15개사: {', '.join(names)}")
+    rows = repo.index_scope()
+    if not rows:
+        typer.echo("더한 회사가 없습니다. dartrag scope add 066570 처럼 더합니다.")
+        return
+    typer.echo(f"더한 회사 {len(rows)}곳:")
+    for stock, name, added_at in rows:
+        typer.echo(f"{stock} {name or '(회사 목록에 아직 없음)'}  {added_at:%Y-%m-%d} 추가")
 
 
 @app.command()

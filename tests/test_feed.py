@@ -108,7 +108,7 @@ class FakeRepo:
         self.inserted += rows
         return [r["rcept_no"] for r in rows[:1]]
 
-    def pending_alerts(self, channel):
+    def pending_alerts(self, channel, focus=None):
         return self.pending
 
     def mark_notified(self, rcept_no, channel):

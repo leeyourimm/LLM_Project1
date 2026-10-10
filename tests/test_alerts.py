@@ -136,7 +136,7 @@ class Repo:
         self.rows = rows
         self.marked = []
 
-    def user_pending_alerts(self):
+    def user_pending_alerts(self, focus=None):
         return self.rows
 
     def latest_diff_summary_for(self, rcept_no):

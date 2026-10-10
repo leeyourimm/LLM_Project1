@@ -66,12 +66,15 @@ def poll(
     return summary
 
 
-def send_alerts(repo: Repository, notifier: Notifier) -> tuple[int, list[str]]:
-    """운영자 관심 종목 알림. 정기보고서에 변경점 요약이 있으면 핵심 문장을 붙인다."""
+def send_alerts(repo: Repository, notifier: Notifier, focus=None) -> tuple[int, list[str]]:
+    """운영자 관심 종목 알림. 정기보고서에 변경점 요약이 있으면 핵심 문장을 붙인다.
+
+    focus: 자동 색인 대상 (Settings.index_focus). 대상 밖 회사의 정기보고서는 처리를 기다리지
+    않고 바로 보낸다."""
     from dartrag.feed.alerts import _headline, format_item
 
     sent, errors = 0, []
-    for d in repo.pending_alerts(notifier.channel):
+    for d in repo.pending_alerts(notifier.channel, focus=focus):
         headline = _headline(repo, d["rcept_no"])
         try:
             notifier.send(format_item(d, headline) if headline else format_alert(d))

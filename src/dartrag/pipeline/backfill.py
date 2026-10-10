@@ -3,6 +3,7 @@
 상장사 2,500여 곳 × 10년이면 OpenDART 호출이 수십만 번이라 하루 한도(키당 20,000회)
 안에서 며칠에 걸쳐 나눠 한다. 회사 단위로 진행 상황을 backfill_state 에 남겨서
 작업자가 재시작돼도 이어서 하고, 새 공시 처리 몫(reserve)은 항상 남겨 둔다.
+INDEX_SCOPE=focus 이면 계획은 전체 상장사로 세우되 자동 색인 대상 회사만 채운다.
 """
 
 import logging
@@ -34,10 +35,12 @@ def backfill_step(
     quota=None,
     reserve: int = 3000,
     today: date | None = None,
+    focus=None,
 ) -> BackfillSummary:
+    """focus: 자동 색인 대상 종목코드 (Settings.index_focus). None 이면 모든 상장사."""
     summary = BackfillSummary()
     today = today or date.today()
-    for corp_code, start_year, end_year in repo.next_backfill(max_companies):
+    for corp_code, start_year, end_year in repo.next_backfill(max_companies, focus=focus):
         if quota is not None and quota.remaining() < reserve:
             summary.stopped = "quota"
             break

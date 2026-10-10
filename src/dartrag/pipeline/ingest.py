@@ -2,6 +2,7 @@
 
 피드가 10분마다 정기공시를 받아 disclosures 에 넣으면, 이 단계가 대기열처럼
 처리하지 않은 것을 꺼내 처리한다. 실패하면 다음에 다시 시도하고, 5번 실패하면 멈춘다.
+INDEX_SCOPE=focus 이면 기본 15개사와 운영자가 더한 회사(dartrag scope add)의 보고서만 꺼낸다.
 """
 
 import logging
@@ -32,9 +33,10 @@ def find_filing(client, d: dict):
     return None
 
 
-def ingest_pending(client, repo, store, *, limit: int = 20) -> IngestSummary:
+def ingest_pending(client, repo, store, *, limit: int = 20, focus=None) -> IngestSummary:
+    """focus: 자동 색인 대상 종목코드 (Settings.index_focus). None 이면 모든 상장사."""
     summary = IngestSummary()
-    for d in repo.periodic_to_ingest(limit):
+    for d in repo.periodic_to_ingest(limit, focus=focus):
         rcept_no = d["rcept_no"]
         try:
             filing = find_filing(client, d)
