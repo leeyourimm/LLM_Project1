@@ -290,6 +290,29 @@ def test_models_load_on_first_use(monkeypatch):
     assert loaded == ["emb", "rr"]  # 한 번만 불러온다
 
 
+def test_embedder_device_is_passed_to_model(monkeypatch):
+    import sys
+    import types
+
+    from dartrag.search import SentenceTransformerEmbedder
+
+    devices = []
+
+    class Model:
+        def __init__(self, name, device=None):
+            devices.append(device)
+
+        def get_sentence_embedding_dimension(self):
+            return 3
+
+    monkeypatch.setitem(
+        sys.modules, "sentence_transformers", types.SimpleNamespace(SentenceTransformer=Model)
+    )
+    assert SentenceTransformerEmbedder("emb", device="cpu").dim == 3
+    assert SentenceTransformerEmbedder("emb", device="").dim == 3  # 비우면 자동
+    assert devices == ["cpu", None]
+
+
 def test_backends_build_nested_clients_without_deadlock(monkeypatch):
     """vector 는 만드는 도중 qdrant 를 꺼낸다. 잠금이 다시 잡히지 않으면 질문이 영원히 멈춘다."""
     import threading

@@ -43,6 +43,9 @@ class Settings(BaseSettings):
     qdrant_url: str = "http://localhost:6333"
     opensearch_url: str = "http://localhost:9200"
     embed_model: str = "BAAI/bge-m3"
+    # 임베딩을 계산할 장치. 비우면 자동(맥은 mps, 아니면 cpu). 맥 메모리가 모자라
+    # 색인이 멈추면 cpu 로 둔다 (느리지만 그래픽 메모리를 쓰지 않는다)
+    embed_device: str = ""
     # 리랭커. 비우면 끔 (메모리가 부족할 때)
     rerank_model: str = "BAAI/bge-reranker-v2-m3"
     recency_weight: float = 0.1

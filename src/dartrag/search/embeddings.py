@@ -23,8 +23,11 @@ class SentenceTransformerEmbedder:
     모델을 불러오지 않는다.
     """
 
-    def __init__(self, model_name: str = "BAAI/bge-m3", batch_size: int = 16):
+    def __init__(
+        self, model_name: str = "BAAI/bge-m3", batch_size: int = 16, device: str | None = None
+    ):
         self.name = model_name
+        self._device = device or None
         self._batch_size = batch_size
         self._model = None
         self._lock = threading.Lock()
@@ -38,7 +41,7 @@ class SentenceTransformerEmbedder:
                     raise RuntimeError(
                         '임베딩 모델을 쓰려면 먼저 설치하세요: pip install -e ".[embed]"'
                     ) from e
-                self._model = SentenceTransformer(self.name)
+                self._model = SentenceTransformer(self.name, device=self._device)
             return self._model
 
     @property

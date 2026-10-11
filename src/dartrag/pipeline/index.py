@@ -34,8 +34,11 @@ def index_filings(
     summary = IndexSummary()
     vector.ensure(embedder.dim)
     keyword.ensure()
-    for rcept_no in repo.filings_to_index(INDEX_VERSION, embedder.name, corp_codes)[:limit]:
+    todo = repo.filings_to_index(INDEX_VERSION, embedder.name, corp_codes)[:limit]
+    for n, rcept_no in enumerate(todo, 1):
         chunks = repo.indexed_chunks(rcept_no)
+        # 오래 걸리는 단계라 공시마다 진행 상황을 남긴다 (멈췄는지 알 수 있게)
+        log.info("색인 %d/%d: %s (청크 %d개)", n, len(todo), rcept_no, len(chunks))
         try:
             # 재파싱으로 청크 ID 가 바뀌었을 수 있으니 공시 단위로 지우고 다시 넣는다
             vector.delete_filing(rcept_no)
