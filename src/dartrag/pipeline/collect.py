@@ -14,6 +14,9 @@ from dartrag.storage.raw import document_key
 
 log = logging.getLogger(__name__)
 
+# OpenDART 상태 코드: 파일이 존재하지 않습니다
+NO_FILE = "014"
+
 
 @dataclass
 class CollectSummary:
@@ -144,8 +147,16 @@ def collect_filing(
         if store.exists(raw_key):
             summary.documents_cached += 1
         else:
-            store.put(raw_key, client.document(filing.rcept_no))
-            summary.documents_downloaded += 1
+            try:
+                store.put(raw_key, client.document(filing.rcept_no))
+                summary.documents_downloaded += 1
+            except DartApiError as e:
+                # 014: 원문 파일이 없는 공시가 가끔 있다. 이 건만 원문 없이 등록하고
+                # 같은 회사의 나머지 공시와 재무제표는 계속 받는다
+                if e.status != NO_FILE:
+                    raise
+                summary.skipped.append(f"{filing.corp_name} {filing.rcept_no}: 원문 파일 없음")
+                raw_key = None
     repo.upsert_filing(filing, report, reprt_code, raw_key)
     summary.filings += 1
 
