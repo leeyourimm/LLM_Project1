@@ -21,6 +21,10 @@ def _schema_dir() -> Path:
 SCHEMA_DIR = _schema_dir()
 
 
+# migrate() 가 테이블 잠금을 기다리는 최대 시간
+MIGRATE_LOCK_TIMEOUT = "15s"
+
+
 class Repository:
     def __init__(self, conn: psycopg.Connection):
         self.conn = conn
@@ -44,8 +48,18 @@ class Repository:
         if not paths:
             # 없는데 그냥 넘어가면 "스키마 적용 완료"라고 하고 아무것도 적용하지 않는다
             raise RuntimeError(f"DB 스키마 파일(*.sql)을 찾지 못했습니다: {SCHEMA_DIR}")
-        for path in paths:
-            self.conn.execute(path.read_text())
+        # 스키마 SQL 은 테이블 잠금을 잡는다. 끝나지 않은 다른 dartrag 작업이 DB 를 붙잡고 있으면
+        # 아무 말 없이 영원히 기다리므로, 잠시 기다려도 안 되면 이유를 알리고 멈춘다
+        self.conn.execute(f"SET LOCAL lock_timeout = '{MIGRATE_LOCK_TIMEOUT}'")
+        try:
+            for path in paths:
+                self.conn.execute(path.read_text())
+        except psycopg.errors.LockNotAvailable:
+            self.conn.rollback()
+            raise RuntimeError(
+                "다른 dartrag 작업이 아직 DB 를 쓰고 있습니다. 그 작업이 끝나길 기다리거나, "
+                "멈춘 작업이면 pkill -9 -f dartrag 로 끈 뒤 다시 실행하세요"
+            ) from None
         self.conn.commit()
 
     def upsert_companies(self, corps: Iterable[Corp]) -> int:

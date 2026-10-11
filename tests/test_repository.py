@@ -1102,3 +1102,19 @@ def test_guest_accounts(repo):
     assert repo.upgrade_guest(live, "again@b.co", "h") is False  # 이미 가입 계정
     assert repo.upgrade_guest(member, "z@b.co", "h") is False
     assert repo.ops_snapshot()["guests"] == 0 and len(repo.users()) == 2
+
+
+def test_migrate_stops_instead_of_waiting_forever_on_a_held_lock(repo, monkeypatch):
+    """멈춘 다른 dartrag 작업이 테이블을 붙잡고 있으면 migrate 가 영원히 기다리던 문제."""
+    import dartrag.db.repository as repository
+
+    monkeypatch.setattr(repository, "MIGRATE_LOCK_TIMEOUT", "200ms")
+    other = psycopg.connect(URL)
+    try:
+        other.execute("LOCK TABLE filings IN ACCESS EXCLUSIVE MODE")
+        with pytest.raises(RuntimeError, match="pkill -9 -f dartrag"):
+            repo.migrate()
+    finally:
+        other.rollback()
+        other.close()
+    repo.migrate()  # 잠금이 풀리면 다시 된다
