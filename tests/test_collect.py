@@ -1,5 +1,6 @@
 from datetime import date
 
+from dartrag.dart import DartApiError
 from dartrag.dart.models import Corp, Filing, FinancialRow
 from dartrag.pipeline.collect import collect
 from dartrag.storage import LocalRawStore
@@ -111,3 +112,29 @@ def test_documents_are_cached(tmp_path):
 def test_unknown_stock_is_reported(tmp_path):
     _, _, summary = run(tmp_path, stocks=("005930", "123456"))
     assert summary.errors == ["123456: 상장사 목록에 없음"]
+
+
+class MissingDocClient(FakeClient):
+    def document(self, rcept_no):
+        if rcept_no == "20240514000002":
+            raise DartApiError("014", "파일이 존재하지 않습니다.")
+        return super().document(rcept_no)
+
+
+def test_missing_document_skips_only_that_filing(tmp_path):
+    _, repo, summary = run(tmp_path, client=MissingDocClient())
+    # 원문이 없는 공시는 원문 없이 등록되고, 같은 회사의 다른 공시와 재무제표는 계속 받는다
+    assert repo.filings["20240514000002"][2] is None
+    assert repo.filings["20250311000001"][2] == "documents/2025/20250311000001.zip"
+    assert ("00126380", 2024, "11013", "CFS") in repo.financials
+    assert summary.errors == []
+    assert any("원문 파일 없음" in s for s in summary.skipped)
+
+
+def test_other_api_errors_still_stop_the_company(tmp_path):
+    class Broken(FakeClient):
+        def document(self, rcept_no):
+            raise DartApiError("020", "요청 제한을 초과하였습니다.")
+
+    _, repo, summary = run(tmp_path, client=Broken())
+    assert summary.errors == ["005930: OpenDART 020: 요청 제한을 초과하였습니다."]
