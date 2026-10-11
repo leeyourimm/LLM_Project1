@@ -31,7 +31,12 @@ class Backends:
     def embedder(self):
         from dartrag.search import SentenceTransformerEmbedder
 
-        return self._get("embedder", lambda: SentenceTransformerEmbedder(self.settings.embed_model))
+        return self._get(
+            "embedder",
+            lambda: SentenceTransformerEmbedder(
+                self.settings.embed_model, device=self.settings.embed_device
+            ),
+        )
 
     @property
     def qdrant(self):
