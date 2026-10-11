@@ -18,8 +18,9 @@ pytestmark = pytest.mark.skipif(not URL, reason="TEST_DATABASE_URL 없음")
 def repo():
     conn = psycopg.connect(URL)
     conn.execute(
-        "DROP TABLE IF EXISTS company_versions, eval_runs, data_issues, job_runs, backfill_state, "
-        "diff_summaries, user_notifications, user_push_subscriptions, user_alert_channels, "
+        "DROP TABLE IF EXISTS schema_state, company_versions, eval_runs, data_issues, job_runs, "
+        "backfill_state, diff_summaries, user_notifications, user_push_subscriptions, "
+        "user_alert_channels, "
         "auth_tokens, user_devices, login_challenges, user_recovery_codes, user_totp, "
         "feedback, messages, conversations, sessions, user_watchlist, "
         "users, notifications, watchlist, disclosures, chunks, financial_items, filings, "
@@ -795,6 +796,8 @@ def test_migration_marks_alert_verified_users(repo):
     repo.start_alert_channel(uid, "email", "a@b.co", "p" * 64, later)
     repo.confirm_alert_channel("email", "p" * 64)
     assert repo.email_verified(uid) is False
+    repo.conn.execute("DELETE FROM schema_state")  # 이 마이그레이션이 새로 추가된 경우
+    repo.conn.commit()
     repo.migrate()  # 마이그레이션은 여러 번 돌려도 된다
     assert repo.email_verified(uid) is True
 
@@ -1109,6 +1112,8 @@ def test_migrate_stops_instead_of_waiting_forever_on_a_held_lock(repo, monkeypat
     import dartrag.db.repository as repository
 
     monkeypatch.setattr(repository, "MIGRATE_LOCK_TIMEOUT", "200ms")
+    repo.conn.execute("DELETE FROM schema_state")  # 스키마가 바뀌어 다시 적용해야 하는 경우
+    repo.conn.commit()
     other = psycopg.connect(URL)
     try:
         other.execute("LOCK TABLE filings IN ACCESS EXCLUSIVE MODE")
@@ -1118,3 +1123,13 @@ def test_migrate_stops_instead_of_waiting_forever_on_a_held_lock(repo, monkeypat
         other.rollback()
         other.close()
     repo.migrate()  # 잠금이 풀리면 다시 된다
+
+
+def test_migrate_skips_unchanged_schema_while_another_connection_reads(repo):
+    """dartrag run 앞 단계 연결이 읽기 트랜잭션을 열어 둔 채라 색인 단계 migrate 가 막히던 문제."""
+    other = psycopg.connect(URL)
+    try:
+        other.execute("SELECT count(*) FROM filings").fetchone()  # idle in transaction
+        Repository(psycopg.connect(URL)).migrate()  # 기다리지 않고 바로 끝난다
+    finally:
+        other.close()

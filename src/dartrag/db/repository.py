@@ -1,3 +1,4 @@
+import hashlib
 from collections.abc import Iterable, Iterator
 from contextlib import contextmanager
 from pathlib import Path
@@ -48,12 +49,28 @@ class Repository:
         if not paths:
             # 없는데 그냥 넘어가면 "스키마 적용 완료"라고 하고 아무것도 적용하지 않는다
             raise RuntimeError(f"DB 스키마 파일(*.sql)을 찾지 못했습니다: {SCHEMA_DIR}")
-        # 스키마 SQL 은 테이블 잠금을 잡는다. 끝나지 않은 다른 dartrag 작업이 DB 를 붙잡고 있으면
-        # 아무 말 없이 영원히 기다리므로, 잠시 기다려도 안 되면 이유를 알리고 멈춘다
+        sqls = [path.read_text() for path in paths]
+        digest = hashlib.sha256("\0".join(sqls).encode()).hexdigest()
+        # 스키마 SQL 은 ALTER TABLE 등으로 강한 테이블 잠금을 잡는다. 같은 프로세스의 앞 단계 연결이
+        # 읽기 트랜잭션을 열어 둔 것만으로도 막히므로, 이미 적용한 스키마면 다시 실행하지 않는다
+        self.conn.execute(
+            "CREATE TABLE IF NOT EXISTS schema_state (id int PRIMARY KEY, digest text NOT NULL)"
+        )
+        row = self.conn.execute("SELECT digest FROM schema_state WHERE id = 1").fetchone()
+        if row and row[0] == digest:
+            self.conn.commit()
+            return
+        # 끝나지 않은 다른 dartrag 작업이 DB 를 붙잡고 있으면 아무 말 없이 영원히 기다리므로,
+        # 잠시 기다려도 안 되면 이유를 알리고 멈춘다
         self.conn.execute(f"SET LOCAL lock_timeout = '{MIGRATE_LOCK_TIMEOUT}'")
         try:
-            for path in paths:
-                self.conn.execute(path.read_text())
+            for sql in sqls:
+                self.conn.execute(sql)
+            self.conn.execute(
+                "INSERT INTO schema_state (id, digest) VALUES (1, %s) "
+                "ON CONFLICT (id) DO UPDATE SET digest = EXCLUDED.digest",
+                (digest,),
+            )
         except psycopg.errors.LockNotAvailable:
             self.conn.rollback()
             raise RuntimeError(
