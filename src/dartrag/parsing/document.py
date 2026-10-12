@@ -107,7 +107,7 @@ def _walk(node, path: list[str], out: list[Section]) -> None:
     out.append(current)
     pending_text: list[str] = []  # 표 바로 앞 문단 (캡션·단위 후보)
 
-    for child in node:
+    for child in _children(node):
         tag = _tag(child)
         if tag is None or tag in SKIP_TAGS:
             continue
@@ -136,6 +136,17 @@ def _walk(node, path: list[str], out: list[Section]) -> None:
             if text:
                 current.blocks.append(Paragraph(text))
                 pending_text = [text]
+
+
+def _children(node):
+    """자식 노드. <LIBRARY> 는 하위 섹션을 감싸기만 하는 상자라 벗기고 그 안의 자식을 내놓는다.
+
+    벗기지 않으면 "II. 사업의 내용" 아래 1~7 절과 재무제표·주석이 제목 없이 한 문단으로 뭉친다."""
+    for child in node:
+        if _tag(child) == "LIBRARY":
+            yield from _children(child)
+        else:
+            yield child
 
 
 def _attach_caption(table: Table, pending: list[str]) -> None:

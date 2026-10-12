@@ -10,7 +10,7 @@ from dartrag.storage import RawStore
 log = logging.getLogger(__name__)
 
 # 파서나 청킹 규칙을 바꾸면 올린다. 이전 버전으로 처리한 공시는 다시 파싱된다.
-PARSER_VERSION = 1
+PARSER_VERSION = 2  # 2: <LIBRARY> 안의 하위 섹션을 나눠 읽음
 
 
 @dataclass
