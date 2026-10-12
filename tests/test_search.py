@@ -334,3 +334,34 @@ def test_backends_build_nested_clients_without_deadlock(monkeypatch):
     worker.join(timeout=5)
     assert not worker.is_alive(), "Backends.vector 가 멈췄습니다"
     assert built["vector"].client is backends.qdrant
+
+
+def test_embedder_uses_half_precision_and_frees_cache_on_mac_gpu(monkeypatch):
+    import sys
+    import types
+
+    from dartrag.search import SentenceTransformerEmbedder
+
+    calls = []
+
+    class Model:
+        device = types.SimpleNamespace(type="mps")
+
+        def __init__(self, name, device=None):
+            pass
+
+        def half(self):
+            calls.append("half")
+
+        def encode(self, texts, **kw):
+            return [types.SimpleNamespace(tolist=lambda: [1.0]) for _ in texts]
+
+    fake_torch = types.SimpleNamespace(
+        mps=types.SimpleNamespace(empty_cache=lambda: calls.append("empty"))
+    )
+    monkeypatch.setitem(sys.modules, "torch", fake_torch)
+    monkeypatch.setitem(
+        sys.modules, "sentence_transformers", types.SimpleNamespace(SentenceTransformer=Model)
+    )
+    assert SentenceTransformerEmbedder("emb").embed_documents(["a", "b"]) == [[1.0], [1.0]]
+    assert calls == ["half", "empty"]

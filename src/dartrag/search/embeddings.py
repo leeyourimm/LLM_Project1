@@ -16,6 +16,11 @@ class Embedder(Protocol):
     def embed_query(self, text: str) -> list[float]: ...
 
 
+def _on_mps(model) -> bool:
+    device = getattr(model, "device", None)
+    return getattr(device, "type", None) == "mps"
+
+
 class SentenceTransformerEmbedder:
     """모델은 처음 임베딩할 때 불러온다. 첫 실행이면 이때 모델 파일(약 2GB)을 내려받는다.
 
@@ -41,7 +46,12 @@ class SentenceTransformerEmbedder:
                     raise RuntimeError(
                         '임베딩 모델을 쓰려면 먼저 설치하세요: pip install -e ".[embed]"'
                     ) from e
-                self._model = SentenceTransformer(self.name, device=self._device)
+                model = SentenceTransformer(self.name, device=self._device)
+                if _on_mps(model):
+                    # 맥 GPU: 반정밀도로 메모리를 절반만 쓴다. 메모리가 모자라면 GPU 작업이
+                    # 오류 없이 멈춰 버리므로(16GB 맥 + Docker) 여유를 남기는 게 중요하다
+                    model.half()
+                self._model = model
             return self._model
 
     @property
@@ -49,9 +59,14 @@ class SentenceTransformerEmbedder:
         return self._loaded().get_sentence_embedding_dimension()
 
     def embed_documents(self, texts: list[str]) -> list[list[float]]:
-        vectors = self._loaded().encode(
+        model = self._loaded()
+        vectors = model.encode(
             texts, batch_size=self._batch_size, normalize_embeddings=True, show_progress_bar=False
         )
+        if _on_mps(model):
+            import torch
+
+            torch.mps.empty_cache()  # 묶음마다 쌓이는 GPU 캐시를 돌려준다
         return [v.tolist() for v in vectors]
 
     def embed_query(self, text: str) -> list[float]:

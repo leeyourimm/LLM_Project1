@@ -90,3 +90,49 @@ def test_long_paragraph_is_split():
     pieces = _split_long(text, 500)
     assert all(len(p) <= 500 for p in pieces)
     assert "".join(pieces).replace(" ", "") == text.replace(" ", "")
+
+
+def test_library_wrapper_keeps_sub_sections_and_tables():
+    """실제 사업보고서는 "II. 사업의 내용" 의 하위 절과 재무제표 주석을 <LIBRARY> 로 감싼다."""
+    xml = """<?xml version="1.0" encoding="utf-8"?>
+<DOCUMENT><DOCUMENT-NAME>사업보고서</DOCUMENT-NAME><BODY>
+<SECTION-1><TITLE>II. 사업의 내용</TITLE>
+<LIBRARY>
+<SECTION-2><TITLE>1. 사업의 개요</TITLE><P>당사는 전자 회사입니다.</P></SECTION-2>
+<SECTION-2><TITLE>2. 주요 제품 및 서비스</TITLE>
+<TABLE><TBODY><TR><TH>부문</TH><TH>제품</TH></TR><TR><TD>DX</TD><TD>TV</TD></TR></TBODY></TABLE>
+</SECTION-2>
+</LIBRARY>
+</SECTION-1>
+</BODY></DOCUMENT>""".encode()
+    doc = parse_document_xml(xml)
+    paths = {tuple(s.path): s for s in doc.sections}
+    assert ("II. 사업의 내용", "1. 사업의 개요") in paths
+    products = paths[("II. 사업의 내용", "2. 주요 제품 및 서비스")]
+    assert products.blocks[0].rows[1] == ["DX", "TV"]
+    # 하위 절 내용이 상위 절에 한 문단으로 뭉치지 않는다
+    assert ("II. 사업의 내용",) not in paths
+
+
+def test_attached_statements_are_dropped_when_the_body_has_them():
+    """사업보고서 본문 III 장과 첨부 감사보고서의 재무제표·주석은 같은 내용이다."""
+    from dartrag.parsing.document import Paragraph, ParsedDocument, Section
+    from dartrag.pipeline.parse import _has_statements, _without_statements
+
+    def section(*path):
+        return Section(path=list(path), blocks=[Paragraph("내용")])
+
+    body = ParsedDocument(
+        "사업보고서",
+        "삼성전자",
+        [section("III. 재무에 관한 사항", "3. 연결재무제표 주석")],
+        "a.xml",
+    )
+    audit = ParsedDocument(
+        "연결감사보고서",
+        "삼성전자",
+        [section("독립된 감사인의 감사보고서"), section("(첨부)연 결 재 무 제 표", "주석")],
+        "b.xml",
+    )
+    assert _has_statements(body) and not _has_statements(audit)
+    assert [s.path for s in _without_statements(audit).sections] == [["독립된 감사인의 감사보고서"]]
