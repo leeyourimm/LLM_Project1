@@ -63,6 +63,22 @@ def load_cases(*paths: Path) -> list[EvalCase]:
     return cases
 
 
+def sample_cases(cases: list[EvalCase], limit: int | None) -> list[EvalCase]:
+    """limit 개만 고른다. 앞에서부터 자르면 파일 앞쪽 종류(예: 손으로 쓴 서술형)만 남으므로
+    종류별로 번갈아 하나씩 고른다. 각 종류 안의 순서는 그대로 둔다."""
+    if limit is None or limit >= len(cases):
+        return list(cases)
+    by_cat: dict[str, list[EvalCase]] = {}
+    for c in cases:
+        by_cat.setdefault(c.category, []).append(c)
+    picked: list[EvalCase] = []
+    while len(picked) < limit:
+        for group in by_cat.values():
+            if group and len(picked) < limit:
+                picked.append(group.pop(0))
+    return picked
+
+
 def save_cases(path: Path, cases: list[EvalCase]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(

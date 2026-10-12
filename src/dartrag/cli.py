@@ -763,12 +763,12 @@ def eval_run(
 ):
     """평가 문항으로 검색·답변을 실행하고 채점 리포트와 배포 기준 판정을 작성."""
     from dartrag.answer.prompt import PROMPT_VERSION
-    from dartrag.eval import load_cases
+    from dartrag.eval import load_cases, sample_cases
     from dartrag.eval.service import run_and_record
     from dartrag.factory import build_answerer
 
     settings = get_settings()
-    cases = load_cases(*files)[:limit]
+    cases = sample_cases(load_cases(*files), limit)  # 종류별로 고르게
     backends, _, repo = _context(None, None, None)
     # 평가는 매번 기본 모델로 실제로 답을 만들어야 하므로 캐시와 대체 모델을 쓰지 않는다
     answerer = build_answerer(backends, repo, use_cache=False, use_fallback=False)
@@ -964,7 +964,8 @@ def run_all(
     start_year: StartYear = None,
     end_year: EndYear = None,
     feed_days: int = 30,
-    eval_limit: Annotated[int, typer.Option(help="평가 문항 수. 0 이면 평가 생략")] = 40,
+    # 배포 기준이 50문항 이상을 요구한다
+    eval_limit: Annotated[int, typer.Option(help="평가 문항 수. 0 이면 평가 생략")] = 60,
 ):
     """준비 점검 → 수집 → 파싱 → 색인 → 공시 피드 → 평가를 차례로 실행."""
     from dartrag.doctor import all_ok, format_checks, run_checks

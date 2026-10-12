@@ -1,4 +1,4 @@
-from dartrag.eval.cases import EvalCase, ExpectedSource, load_cases, save_cases
+from dartrag.eval.cases import EvalCase, ExpectedSource, load_cases, sample_cases, save_cases
 from dartrag.eval.grading import Grade, grade
 from dartrag.eval.runner import run_eval, summarize, write_report
 
@@ -9,6 +9,7 @@ __all__ = [
     "grade",
     "load_cases",
     "run_eval",
+    "sample_cases",
     "save_cases",
     "summarize",
     "write_report",
