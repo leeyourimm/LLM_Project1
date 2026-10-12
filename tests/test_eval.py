@@ -5,7 +5,15 @@ import pytest
 
 from dartrag.answer import NOT_FOUND, Answer
 from dartrag.answer.service import check_citations
-from dartrag.eval import EvalCase, ExpectedSource, grade, load_cases, run_eval, write_report
+from dartrag.eval import (
+    EvalCase,
+    ExpectedSource,
+    grade,
+    load_cases,
+    run_eval,
+    sample_cases,
+    write_report,
+)
 from dartrag.eval.generate import generate_cases
 from dartrag.eval.grading import number_recall
 from dartrag.finance.tool import Value
@@ -182,3 +190,13 @@ def test_adversarial_grading():
     assert grade(case, Answer("q", "안내", found=False, refused="advice")).passed
     g = grade(case, Answer("q", "네 사세요 [1]."))
     assert not g.passed and "거절해야" in g.reasons[0]
+
+
+def test_sample_cases_takes_every_category_in_turn():
+    cases = [EvalCase(f"t{i}", "질문", "text") for i in range(5)] + [
+        EvalCase(f"n{i}", "질문", "numeric") for i in range(3)
+    ]
+    picked = sample_cases(cases, 4)
+    assert [c.id for c in picked] == ["t0", "n0", "t1", "n1"]
+    assert sample_cases(cases, None) == cases
+    assert sample_cases(cases, 100) == cases
