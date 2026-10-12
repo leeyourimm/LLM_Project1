@@ -112,3 +112,27 @@ def test_library_wrapper_keeps_sub_sections_and_tables():
     assert products.blocks[0].rows[1] == ["DX", "TV"]
     # 하위 절 내용이 상위 절에 한 문단으로 뭉치지 않는다
     assert ("II. 사업의 내용",) not in paths
+
+
+def test_attached_statements_are_dropped_when_the_body_has_them():
+    """사업보고서 본문 III 장과 첨부 감사보고서의 재무제표·주석은 같은 내용이다."""
+    from dartrag.parsing.document import Paragraph, ParsedDocument, Section
+    from dartrag.pipeline.parse import _has_statements, _without_statements
+
+    def section(*path):
+        return Section(path=list(path), blocks=[Paragraph("내용")])
+
+    body = ParsedDocument(
+        "사업보고서",
+        "삼성전자",
+        [section("III. 재무에 관한 사항", "3. 연결재무제표 주석")],
+        "a.xml",
+    )
+    audit = ParsedDocument(
+        "연결감사보고서",
+        "삼성전자",
+        [section("독립된 감사인의 감사보고서"), section("(첨부)연 결 재 무 제 표", "주석")],
+        "b.xml",
+    )
+    assert _has_statements(body) and not _has_statements(audit)
+    assert [s.path for s in _without_statements(audit).sections] == [["독립된 감사인의 감사보고서"]]
